@@ -123,11 +123,78 @@ inline void DiffPatchScalarFun(DataChunk &args, ExpressionState &state, Vector &
 	    });
 }
 
+inline void PatchLenScalarFun(DataChunk &args, ExpressionState &state, Vector &result) {
+	// Computes the resulting length of applying a patch JSON to any base string
+	// Only '=' (copy n) and '+' (insert s) contribute to the final length
+	auto &patch_col = args.data[0];
+	UnaryExecutor::Execute<string_t, int64_t>(patch_col, result, args.size(), [&](string_t patch_str_t) -> int64_t {
+		std::string patch_str = patch_str_t.GetString();
+		yyjson_doc *doc = yyjson_read(patch_str.c_str(), patch_str.size(), 0);
+		if (!doc) {
+			return 0;
+		}
+		yyjson_val *root = yyjson_doc_get_root(doc);
+		if (!root || !yyjson_is_arr(root)) {
+			yyjson_doc_free(doc);
+			return 0;
+		}
+		long long total = 0;
+		yyjson_arr_iter it;
+		yyjson_arr_iter_init(root, &it);
+		yyjson_val *elem;
+		while ((elem = yyjson_arr_iter_next(&it))) {
+			if (!yyjson_is_arr(elem) || yyjson_arr_size(elem) < 2) {
+				continue;
+			}
+			yyjson_val *tag_val = yyjson_arr_get(elem, 0);
+			yyjson_val *val_val = yyjson_arr_get(elem, 1);
+			const char *tag = yyjson_get_str(tag_val);
+			if (!tag) {
+				continue;
+			}
+			if (tag[0] == '+' && tag[1] == '\0') {
+				if (yyjson_is_str(val_val)) {
+					total += (long long)yyjson_get_len(val_val);
+				} else if (yyjson_is_int(val_val)) {
+					char buf[32];
+					int len = snprintf(buf, sizeof(buf), "%lld", (long long)yyjson_get_int(val_val));
+					if (len > 0)
+						total += len;
+				} else if (yyjson_is_real(val_val)) {
+					char buf[64];
+					int len = snprintf(buf, sizeof(buf), "%g", yyjson_get_real(val_val));
+					if (len > 0)
+						total += len;
+				}
+			} else if (tag[0] == '=' && tag[1] == '\0') {
+				long long n = 0;
+				if (yyjson_is_int(val_val)) {
+					n = yyjson_get_int(val_val);
+				} else if (yyjson_is_str(val_val)) {
+					const char *s = yyjson_get_str(val_val);
+					n = s ? atoll(s) : 0;
+				}
+				if (n > 0)
+					total += n;
+			} else {
+				// '-' and unknown ops do not contribute
+			}
+		}
+		yyjson_doc_free(doc);
+		return (int64_t)total;
+	});
+}
+
 static void LoadInternal(DatabaseInstance &instance) {
 	// Register a scalar function
 	auto diff_patch_scalar_function = ScalarFunction("diff_patch", {LogicalType::VARCHAR, LogicalType::VARCHAR},
 	                                                 LogicalType::VARCHAR, DiffPatchScalarFun);
 	ExtensionUtil::RegisterFunction(instance, diff_patch_scalar_function);
+
+	// Register patch_len(patch_json) -> BIGINT
+	auto patch_len_scalar_function =
+	    ScalarFunction("patch_len", {LogicalType::VARCHAR}, LogicalType::BIGINT, PatchLenScalarFun);
+	ExtensionUtil::RegisterFunction(instance, patch_len_scalar_function);
 }
 
 void DiffPatchExtension::Load(DuckDB &db) {
