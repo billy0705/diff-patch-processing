@@ -1,0 +1,38 @@
+# name: test/sql/diff_patch.test
+# description: test diff_patch extension
+# group: [sql]
+
+# Before we load the extension, this will fail
+statement error
+SELECT diff_patch('hello', '[ ["=", 5] ]');
+----
+Catalog Error: Scalar Function with name diff_patch does not exist!
+
+# Require statement will ensure this test is run with this extension loaded
+require diff_patch
+
+# Confirm the extension works
+query I
+SELECT diff_patch('hello', '[ ["=", 5], ["+", "!"] ]');
+----
+hello!
+
+query I
+SELECT diff_patch('abcdef', '[ ["=", 2], ["+", "XY"], ["-", 3], ["=", 1] ]');
+----
+abXYf
+
+query I
+SELECT diff_patch('spaghetti', '[ ["-", 4], ["+", "a"], ["=", 3] ]');
+----
+ahet
+
+query I
+SELECT diff_patch('data', '[ ["?", 2], ["=", 2] ]');
+----
+da
+
+query I
+SELECT diff_patch('x', '"oops"');
+----
+x
