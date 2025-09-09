@@ -21,6 +21,71 @@ using namespace duckdb_yyjson;
 
 namespace duckdb {
 
+// UTF-8 helpers: advance by code points and count them safely
+static inline size_t Utf8CharLen(unsigned char lead) {
+	if (lead < 0x80)
+		return 1; // 0xxxxxxx
+	if ((lead >> 5) == 0x6)
+		return 2; // 110xxxxx
+	if ((lead >> 4) == 0xE)
+		return 3; // 1110xxxx
+	if ((lead >> 3) == 0x1E)
+		return 4; // 11110xxx
+	return 1;     // invalid lead, treat as single byte to avoid looping
+}
+
+static inline bool IsUtf8Continuation(unsigned char c) {
+	return (c & 0xC0) == 0x80;
+}
+
+static inline size_t Utf8AdvanceBytes(const std::string &s, size_t start_byte, size_t n_codepoints) {
+	size_t i = start_byte;
+	size_t end = s.size();
+	size_t advanced = 0;
+	while (i < end && n_codepoints > 0) {
+		unsigned char lead = static_cast<unsigned char>(s[i]);
+		size_t clen = Utf8CharLen(lead);
+		if (i + clen > end) {
+			// truncated sequence; advance 1 to avoid infinite loop
+			clen = 1;
+		} else if (clen > 1) {
+			// validate continuation bytes; if invalid, fall back to 1-byte advance
+			for (size_t k = 1; k < clen; ++k) {
+				if (!IsUtf8Continuation(static_cast<unsigned char>(s[i + k]))) {
+					clen = 1;
+					break;
+				}
+			}
+		}
+		i += clen;
+		advanced += clen;
+		--n_codepoints;
+	}
+	return advanced; // number of bytes consumed for n_codepoints (or until end)
+}
+
+static inline size_t Utf8CountCodepoints(const char *data, size_t len) {
+	size_t i = 0;
+	size_t count = 0;
+	while (i < len) {
+		unsigned char lead = static_cast<unsigned char>(data[i]);
+		size_t clen = Utf8CharLen(lead);
+		if (i + clen > len)
+			clen = 1; // truncated tail
+		else if (clen > 1) {
+			for (size_t k = 1; k < clen; ++k) {
+				if (!IsUtf8Continuation(static_cast<unsigned char>(data[i + k]))) {
+					clen = 1;
+					break;
+				}
+			}
+		}
+		i += clen;
+		++count;
+	}
+	return count;
+}
+
 inline void DiffPatchScalarFun(DataChunk &args, ExpressionState &state, Vector &result) {
 	// Implements patch_decompress2(old, js) where js is a JSON
 	// array like: [["=", 5], ["+", "foo"], ["-", 2], ...]
@@ -72,14 +137,15 @@ inline void DiffPatchScalarFun(DataChunk &args, ExpressionState &state, Vector &
 				    }
 				    if (n < 0)
 					    n = 0;
-				    size_t take = (size_t)n;
+				    // advance by n UTF-8 code points from current byte index
 				    if (idx > old_str.size())
 					    idx = old_str.size();
-				    size_t remain = old_str.size() - idx;
-				    if (take > remain)
-					    take = remain;
-				    out.append(old_str.data() + idx, take);
-				    idx += take;
+				    size_t remain_bytes = old_str.size() - idx;
+				    size_t bytes_to_take = Utf8AdvanceBytes(old_str, idx, (size_t)n);
+				    if (bytes_to_take > remain_bytes)
+					    bytes_to_take = remain_bytes;
+				    out.append(old_str.data() + idx, bytes_to_take);
+				    idx += bytes_to_take;
 			    } else if (tag[0] == '+' && tag[1] == '\0') {
 				    if (yyjson_is_str(val_val)) {
 					    const char *s = yyjson_get_str(val_val);
@@ -106,13 +172,13 @@ inline void DiffPatchScalarFun(DataChunk &args, ExpressionState &state, Vector &
 				    }
 				    if (n < 0)
 					    n = 0;
-				    size_t skip = (size_t)n;
 				    if (idx > old_str.size())
 					    idx = old_str.size();
-				    size_t remain = old_str.size() - idx;
-				    if (skip > remain)
-					    skip = remain;
-				    idx += skip;
+				    size_t remain_bytes = old_str.size() - idx;
+				    size_t bytes_to_skip = Utf8AdvanceBytes(old_str, idx, (size_t)n);
+				    if (bytes_to_skip > remain_bytes)
+					    bytes_to_skip = remain_bytes;
+				    idx += bytes_to_skip;
 			    } else {
 				    // ignore unknown op
 			    }
@@ -124,7 +190,7 @@ inline void DiffPatchScalarFun(DataChunk &args, ExpressionState &state, Vector &
 }
 
 inline void PatchLenScalarFun(DataChunk &args, ExpressionState &state, Vector &result) {
-	// Computes the resulting length of applying a patch JSON to any base string
+	// Computes the resulting UTF-8 code point length applying a patch JSON
 	// Only '=' (copy n) and '+' (insert s) contribute to the final length
 	auto &patch_col = args.data[0];
 	UnaryExecutor::Execute<string_t, int64_t>(patch_col, result, args.size(), [&](string_t patch_str_t) -> int64_t {
@@ -154,7 +220,10 @@ inline void PatchLenScalarFun(DataChunk &args, ExpressionState &state, Vector &r
 			}
 			if (tag[0] == '+' && tag[1] == '\0') {
 				if (yyjson_is_str(val_val)) {
-					total += (long long)yyjson_get_len(val_val);
+					// Count inserted string in code points, not bytes
+					const char *s = yyjson_get_str(val_val);
+					size_t blen = (size_t)yyjson_get_len(val_val);
+					total += (long long)Utf8CountCodepoints(s ? s : "", blen);
 				} else if (yyjson_is_int(val_val)) {
 					char buf[32];
 					int len = snprintf(buf, sizeof(buf), "%lld", (long long)yyjson_get_int(val_val));
