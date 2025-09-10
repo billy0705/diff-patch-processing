@@ -36,3 +36,38 @@ query I
 SELECT diff_patch('x', '"oops"');
 ----
 x
+
+# Generate a patch and apply it back
+query I
+SELECT diff_patch('héllo', make_patch('héllo', 'héX!lo'));
+----
+héX!lo
+
+# patch_len: counts UTF-8 code points from '=' and '+'
+query I
+SELECT patch_len('[ ["=", 6], ["+", "the "], ["=", 5] ]');
+----
+15
+
+query I
+SELECT patch_len('[ ["=", 2], ["+", "🙂"], ["=", 3] ]');
+----
+6
+
+# make_patch: basic ASCII insert
+query I
+SELECT make_patch('Hello world', 'Hello the world');
+----
+[["=",6],["+","the "],["=",5]]
+
+# make_patch + patch_len should equal new string length (code points)
+query I
+SELECT patch_len(make_patch('héllo', 'héX!lo'));
+----
+6
+
+# Round-trip with ASCII
+query I
+SELECT diff_patch('Hello world', make_patch('Hello world', 'Hello the world'));
+----
+Hello the world

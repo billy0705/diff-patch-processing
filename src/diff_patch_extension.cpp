@@ -13,6 +13,7 @@
 
 // JSON parser (yyjson comes with DuckDB)
 #include "yyjson.hpp"
+#include "include/diff_lib.hpp"
 // DuckDB vendors yyjson under namespace duckdb_yyjson
 using namespace duckdb_yyjson;
 
@@ -264,6 +265,22 @@ static void LoadInternal(DatabaseInstance &instance) {
 	auto patch_len_scalar_function =
 	    ScalarFunction("patch_len", {LogicalType::VARCHAR}, LogicalType::BIGINT, PatchLenScalarFun);
 	ExtensionUtil::RegisterFunction(instance, patch_len_scalar_function);
+
+	// Register make_patch(old, new) -> VARCHAR(JSON)
+	auto make_patch_scalar_function =
+	    ScalarFunction("make_patch", {LogicalType::VARCHAR, LogicalType::VARCHAR}, LogicalType::VARCHAR,
+	                   [](DataChunk &args, ExpressionState &state, Vector &result) {
+		                   auto &old_col = args.data[0];
+		                   auto &new_col = args.data[1];
+		                   BinaryExecutor::Execute<string_t, string_t, string_t>(
+		                       old_col, new_col, result, args.size(), [&](string_t old_t, string_t new_t) -> string_t {
+			                       std::string old_s = old_t.GetString();
+			                       std::string new_s = new_t.GetString();
+			                       std::string js = diffpatch::GeneratePatchJson(old_s, new_s, false, nullptr);
+			                       return StringVector::AddString(result, js);
+		                       });
+	                   });
+	ExtensionUtil::RegisterFunction(instance, make_patch_scalar_function);
 }
 
 void DiffPatchExtension::Load(DuckDB &db) {
