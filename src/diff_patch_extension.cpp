@@ -16,6 +16,7 @@
 // JSON parser (yyjson comes with DuckDB)
 #include "yyjson.hpp"
 #include "include/utf8_utils.hpp"
+#include "include/patch_json_utils.hpp"
 #include "include/diff_lib.hpp"
 // DuckDB vendors yyjson under namespace duckdb_yyjson
 using namespace duckdb_yyjson;
@@ -38,94 +39,31 @@ inline void DiffPatchScalarFun(DataChunk &args, ExpressionState &state, Vector &
 		    std::string old_str = old_str_t.GetString();
 		    std::string patch_str = patch_str_t.GetString();
 
-		    // Parse JSON using yyjson
-		    yyjson_doc *doc = yyjson_read(patch_str.c_str(), patch_str.size(), 0);
-		    if (!doc) {
-			    // If parsing fails, return old unchanged (or empty). Here: return old
+		    std::vector<patchjson::PatchOp> ops;
+		    if (!patchjson::ParsePatchJSON(patch_str, ops)) {
 			    return StringVector::AddString(result, old_str);
 		    }
-		    yyjson_val *root = yyjson_doc_get_root(doc);
-		    if (!root || !yyjson_is_arr(root)) {
-			    yyjson_doc_free(doc);
-			    return StringVector::AddString(result, old_str);
-		    }
-
 		    size_t idx = 0;
 		    std::string out;
 		    out.reserve(old_str.size() + 64);
-
-		    yyjson_arr_iter it;
-		    yyjson_arr_iter_init(root, &it);
-		    yyjson_val *elem;
-		    while ((elem = yyjson_arr_iter_next(&it))) {
-			    if (!yyjson_is_arr(elem) || yyjson_arr_size(elem) < 2) {
-				    continue; // ignore malformed ops
-			    }
-			    yyjson_val *tag_val = yyjson_arr_get(elem, 0);
-			    yyjson_val *val_val = yyjson_arr_get(elem, 1);
-			    const char *tag = yyjson_get_str(tag_val);
-			    if (!tag) {
-				    continue;
-			    }
-
-			    if (tag[0] == '=' && tag[1] == '\0') {
-				    long long n = 0;
-				    if (yyjson_is_int(val_val)) {
-					    n = yyjson_get_int(val_val);
-				    } else if (yyjson_is_str(val_val)) {
-					    const char *s = yyjson_get_str(val_val);
-					    n = s ? atoll(s) : 0;
-				    }
-				    if (n < 0)
-					    n = 0;
-				    // advance by n UTF-8 code points from current byte index
-				    if (idx > old_str.size())
-					    idx = old_str.size();
+		    for (auto &op : ops) {
+			    if (op.tag == '=') {
+				    size_t bytes_to_take = Utf8AdvanceBytes(old_str, idx, (size_t)op.count);
 				    size_t remain_bytes = old_str.size() - idx;
-				    size_t bytes_to_take = Utf8AdvanceBytes(old_str, idx, (size_t)n);
 				    if (bytes_to_take > remain_bytes)
 					    bytes_to_take = remain_bytes;
 				    out.append(old_str.data() + idx, bytes_to_take);
 				    idx += bytes_to_take;
-			    } else if (tag[0] == '+' && tag[1] == '\0') {
-				    if (yyjson_is_str(val_val)) {
-					    const char *s = yyjson_get_str(val_val);
-					    if (s)
-						    out.append(s);
-				    } else if (yyjson_is_int(val_val)) {
-					    char buf[32];
-					    int len = snprintf(buf, sizeof(buf), "%lld", (long long)yyjson_get_int(val_val));
-					    if (len > 0)
-						    out.append(buf, (size_t)len);
-				    } else if (yyjson_is_real(val_val)) {
-					    char buf[64];
-					    int len = snprintf(buf, sizeof(buf), "%g", yyjson_get_real(val_val));
-					    if (len > 0)
-						    out.append(buf, (size_t)len);
-				    }
-			    } else if (tag[0] == '-' && tag[1] == '\0') {
-				    long long n = 0;
-				    if (yyjson_is_int(val_val)) {
-					    n = yyjson_get_int(val_val);
-				    } else if (yyjson_is_str(val_val)) {
-					    const char *s = yyjson_get_str(val_val);
-					    n = s ? atoll(s) : 0;
-				    }
-				    if (n < 0)
-					    n = 0;
-				    if (idx > old_str.size())
-					    idx = old_str.size();
+			    } else if (op.tag == '+') {
+				    out.append(op.insert);
+			    } else if (op.tag == '-') {
+				    size_t bytes_to_skip = Utf8AdvanceBytes(old_str, idx, (size_t)op.count);
 				    size_t remain_bytes = old_str.size() - idx;
-				    size_t bytes_to_skip = Utf8AdvanceBytes(old_str, idx, (size_t)n);
 				    if (bytes_to_skip > remain_bytes)
 					    bytes_to_skip = remain_bytes;
 				    idx += bytes_to_skip;
-			    } else {
-				    // ignore unknown op
 			    }
 		    }
-
-		    yyjson_doc_free(doc);
 		    return StringVector::AddString(result, out);
 	    });
 }
@@ -136,61 +74,19 @@ inline void PatchLenScalarFun(DataChunk &args, ExpressionState &state, Vector &r
 	auto &patch_col = args.data[0];
 	UnaryExecutor::Execute<string_t, int64_t>(patch_col, result, args.size(), [&](string_t patch_str_t) -> int64_t {
 		std::string patch_str = patch_str_t.GetString();
-		yyjson_doc *doc = yyjson_read(patch_str.c_str(), patch_str.size(), 0);
-		if (!doc) {
-			return 0;
-		}
-		yyjson_val *root = yyjson_doc_get_root(doc);
-		if (!root || !yyjson_is_arr(root)) {
-			yyjson_doc_free(doc);
+		std::vector<patchjson::PatchOp> ops;
+		if (!patchjson::ParsePatchJSON(patch_str, ops)) {
 			return 0;
 		}
 		long long total = 0;
-		yyjson_arr_iter it;
-		yyjson_arr_iter_init(root, &it);
-		yyjson_val *elem;
-		while ((elem = yyjson_arr_iter_next(&it))) {
-			if (!yyjson_is_arr(elem) || yyjson_arr_size(elem) < 2) {
-				continue;
-			}
-			yyjson_val *tag_val = yyjson_arr_get(elem, 0);
-			yyjson_val *val_val = yyjson_arr_get(elem, 1);
-			const char *tag = yyjson_get_str(tag_val);
-			if (!tag) {
-				continue;
-			}
-			if (tag[0] == '+' && tag[1] == '\0') {
-				if (yyjson_is_str(val_val)) {
-					// Count inserted string in code points, not bytes
-					const char *s = yyjson_get_str(val_val);
-					size_t blen = (size_t)yyjson_get_len(val_val);
-					total += (long long)Utf8CountCodepoints(s ? s : "", blen);
-				} else if (yyjson_is_int(val_val)) {
-					char buf[32];
-					int len = snprintf(buf, sizeof(buf), "%lld", (long long)yyjson_get_int(val_val));
-					if (len > 0)
-						total += len;
-				} else if (yyjson_is_real(val_val)) {
-					char buf[64];
-					int len = snprintf(buf, sizeof(buf), "%g", yyjson_get_real(val_val));
-					if (len > 0)
-						total += len;
-				}
-			} else if (tag[0] == '=' && tag[1] == '\0') {
-				long long n = 0;
-				if (yyjson_is_int(val_val)) {
-					n = yyjson_get_int(val_val);
-				} else if (yyjson_is_str(val_val)) {
-					const char *s = yyjson_get_str(val_val);
-					n = s ? atoll(s) : 0;
-				}
-				if (n > 0)
-					total += n;
-			} else {
-				// '-' and unknown ops do not contribute
+		for (auto &op : ops) {
+			if (op.tag == '+') {
+				total += (long long)Utf8CountCodepoints(op.insert.c_str(), op.insert.size());
+			} else if (op.tag == '=') {
+				if (op.count > 0)
+					total += (long long)op.count;
 			}
 		}
-		yyjson_doc_free(doc);
 		return (int64_t)total;
 	});
 }
@@ -218,23 +114,25 @@ inline void ApplyColsScalarFun(DataChunk &args, ExpressionState &state, Vector &
 	auto out_data = FlatVector::GetData<string_t>(result);
 
 	for (idx_t i = 0; i < args.size(); i++) {
-		if (FlatVector::IsNull(old_col, i) || FlatVector::IsNull(ops_col, i) || FlatVector::IsNull(plus_col, i) ||
-		    FlatVector::IsNull(vals_col, i)) {
-			// if any input is NULL, return NULL
+		// Only old_content being NULL should yield NULL result.
+		if (FlatVector::IsNull(old_col, i)) {
 			FlatVector::SetNull(result, i, true);
 			continue;
 		}
 
 		std::string old_s = old_data[i].GetString();
-		std::string ops_s = ops_data[i].GetString();
-		std::string plus_s = plus_data[i].GetString();
+		// Treat NULL ops/plus/vals as empty values
+		std::string ops_s = FlatVector::IsNull(ops_col, i) ? std::string() : ops_data[i].GetString();
+		std::string plus_s = FlatVector::IsNull(plus_col, i) ? std::string() : plus_data[i].GetString();
 
-		// gather vals for this row
+		// gather vals for this row (NULL -> empty list)
 		std::vector<int64_t> vals;
-		auto entry = list_entries[i];
-		vals.reserve(entry.length);
-		for (idx_t j = 0; j < entry.length; j++) {
-			vals.push_back(vals_child_data[entry.offset + j]);
+		if (!FlatVector::IsNull(vals_col, i)) {
+			auto entry = list_entries[i];
+			vals.reserve(entry.length);
+			for (idx_t j = 0; j < entry.length; j++) {
+				vals.push_back(vals_child_data[entry.offset + j]);
+			}
 		}
 
 		size_t old_idx = 0;       // byte index into old_s
@@ -282,6 +180,7 @@ inline void ApplyColsScalarFun(DataChunk &args, ExpressionState &state, Vector &
 			}
 		}
 
+		// Return empty string if result is empty, not NULL
 		out_data[i] = StringVector::AddString(result, out);
 	}
 }
@@ -336,88 +235,29 @@ static void MakeColsFromPatchJSON(const std::string &patch_json, std::string &op
 	ops_out.clear();
 	plus_concat_out.clear();
 	vals_out.clear();
-
 	idx_t ins_codepoints_total = 0;
-
-	// Parse JSON
-	yyjson_doc *doc = yyjson_read(patch_json.c_str(), patch_json.size(), 0);
-	if (!doc) {
-		return; // leave outputs empty
-	}
-	yyjson_val *root = yyjson_doc_get_root(doc);
-	if (!root || !yyjson_is_arr(root)) {
-		yyjson_doc_free(doc);
+	std::vector<patchjson::PatchOp> ops;
+	if (!patchjson::ParsePatchJSON(patch_json, ops)) {
 		return;
 	}
-
-	yyjson_arr_iter it;
-	yyjson_arr_iter_init(root, &it);
-	yyjson_val *elem;
-	while ((elem = yyjson_arr_iter_next(&it))) {
-		if (!yyjson_is_arr(elem) || yyjson_arr_size(elem) < 2) {
-			continue;
-		}
-		yyjson_val *tag_val = yyjson_arr_get(elem, 0);
-		yyjson_val *val_val = yyjson_arr_get(elem, 1);
-		const char *tag = yyjson_get_str(tag_val);
-		if (!tag || tag[1] != '\0') {
-			continue;
-		}
-		char t = tag[0];
-		if (t == '=') {
-			long long n = 0;
-			if (yyjson_is_int(val_val)) {
-				n = yyjson_get_int(val_val);
-			} else if (yyjson_is_str(val_val)) {
-				const char *s = yyjson_get_str(val_val);
-				n = s ? atoll(s) : 0;
-			}
-			if (n < 0)
-				n = 0;
+	for (auto &op : ops) {
+		if (op.tag == '=') {
 			ops_out.push_back('=');
-			vals_out.push_back((int64_t)n);
-		} else if (t == '+') {
-			// Convert payload to string and append to plus_concat_out
-			std::string ins;
-			if (yyjson_is_str(val_val)) {
-				const char *s = yyjson_get_str(val_val);
-				if (s)
-					ins.assign(s, yyjson_get_len(val_val));
-			} else if (yyjson_is_int(val_val)) {
-				char buf[32];
-				int len = snprintf(buf, sizeof(buf), "%lld", (long long)yyjson_get_int(val_val));
-				if (len > 0)
-					ins.assign(buf, (size_t)len);
-			} else if (yyjson_is_real(val_val)) {
-				char buf[64];
-				int len = snprintf(buf, sizeof(buf), "%g", yyjson_get_real(val_val));
-				if (len > 0)
-					ins.assign(buf, (size_t)len);
-			}
-			if (!ins.empty()) {
-				plus_concat_out.append(ins);
-				// Count codepoints in the inserted substring
-				ins_codepoints_total += (idx_t)Utf8CountCodepoints(ins.c_str(), ins.size());
+			vals_out.push_back((int64_t)std::max<int64_t>(0, op.count));
+		} else if (op.tag == '+') {
+			if (!op.insert.empty()) {
+				plus_concat_out.append(op.insert);
+				ins_codepoints_total += (idx_t)Utf8CountCodepoints(op.insert.c_str(), op.insert.size());
 			}
 			ops_out.push_back('+');
 			vals_out.push_back((int64_t)ins_codepoints_total);
-		} else if (t == '-') {
-			long long n = 0;
-			if (yyjson_is_int(val_val)) {
-				n = yyjson_get_int(val_val);
-			} else if (yyjson_is_str(val_val)) {
-				const char *s = yyjson_get_str(val_val);
-				n = s ? atoll(s) : 0;
-			}
-			if (n < 0)
-				n = 0;
+		} else if (op.tag == '-') {
 			ops_out.push_back('-');
-			vals_out.push_back((int64_t)n);
+			vals_out.push_back((int64_t)std::max<int64_t>(0, op.count));
 		} else {
-			// ignore unknown op
+			// ignore
 		}
 	}
-	yyjson_doc_free(doc);
 }
 
 // ---- Dynamic-named outputs ----
