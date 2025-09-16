@@ -111,32 +111,52 @@ inline void ApplyColsScalarFun(DataChunk &args, ExpressionState &state, Vector &
 	auto &vals_child = ListVector::GetEntry(vals_col);
 	auto vals_child_data = FlatVector::GetData<int64_t>(vals_child);
 
-	auto out_data = FlatVector::GetData<string_t>(result);
+	// Ensure we are writing into a flat vector
+	result.SetVectorType(VectorType::FLAT_VECTOR);
+    auto out_data = FlatVector::GetData<string_t>(result);
 
 	for (idx_t i = 0; i < args.size(); i++) {
-		// Only old_content being NULL should yield NULL result.
-		if (FlatVector::IsNull(old_col, i)) {
-			FlatVector::SetNull(result, i, true);
-			continue;
-		}
+		bool old_is_null = FlatVector::IsNull(old_col, i);
+		bool ops_is_null = FlatVector::IsNull(ops_col, i);
+		bool plus_is_null = FlatVector::IsNull(plus_col, i);
+		bool vals_is_null = FlatVector::IsNull(vals_col, i);
 
-		std::string old_s = old_data[i].GetString();
-		// Treat NULL ops/plus/vals as empty values
-		std::string ops_s = FlatVector::IsNull(ops_col, i) ? std::string() : ops_data[i].GetString();
-		std::string plus_s = FlatVector::IsNull(plus_col, i) ? std::string() : plus_data[i].GetString();
+        // If any of ops/plus/vals is NULL → result is NULL
+        if (ops_is_null || plus_is_null || vals_is_null) {
+            FlatVector::SetNull(result, i, true);
+            continue;
+        }
 
-		// gather vals for this row (NULL -> empty list)
-		std::vector<int64_t> vals;
-		if (!FlatVector::IsNull(vals_col, i)) {
-			auto entry = list_entries[i];
-			vals.reserve(entry.length);
-			for (idx_t j = 0; j < entry.length; j++) {
-				vals.push_back(vals_child_data[entry.offset + j]);
-			}
-		}
+        std::string ops_s = ops_data[i].GetString();
+        std::string plus_s = plus_data[i].GetString();
 
+        std::vector<int64_t> vals;
+        {
+            auto entry = list_entries[i];
+            vals.reserve(entry.length);
+            for (idx_t j = 0; j < entry.length; j++) {
+                vals.push_back(vals_child_data[entry.offset + j]);
+            }
+        }
+
+		// Special rule: if old is NULL but we have non-empty ops/plus/vals
+		// then treat old as empty string and compute; only return NULL when
+		// old is NULL AND ops/plus/vals are all empty.
+        if (old_is_null) {
+            bool ops_empty = ops_s.empty();
+            bool plus_empty = plus_s.empty();
+            bool vals_empty = vals.empty();
+            if (ops_empty && plus_empty && vals_empty) {
+                FlatVector::SetNull(result, i, true);
+                continue;
+            }
+        }
+
+		std::string old_s = old_is_null ? std::string() : old_data[i].GetString();
+
+		// Use byte indices + Utf8AdvanceBytes scanning
 		size_t old_idx = 0;       // byte index into old_s
-		size_t ins_cp_idx = 0;    // codepoint index processed from plus_s
+		size_t ins_cp_idx = 0;    // cumulative cp consumed from plus_s
 		size_t plus_byte_idx = 0; // byte index into plus_s corresponding to ins_cp_idx
 		std::string out;
 		out.reserve(old_s.size() + plus_s.size());
@@ -475,6 +495,8 @@ static void LoadInternal(DatabaseInstance &instance) {
 		    "apply_cols",
 		    {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::LIST(LogicalType::BIGINT)},
 		    LogicalType::VARCHAR, ApplyColsScalarFun);
+		// We handle NULLs manually (old may be NULL but ops/plus/vals non-empty)
+		apply_cols_fn.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
 		ExtensionUtil::RegisterFunction(instance, apply_cols_fn);
 	}
 

@@ -74,3 +74,56 @@ ORDER BY id
 1	5
 2	5
 3	6
+
+# ---------------- Edge Cases: UTF-8 / NULL / Empty Patch ----------------
+
+# 空補丁 JSON → 空字串；長度 0
+query IT
+SELECT diff_patch('abc', '[]'), patch_len('[]')
+----
+(empty)	0
+
+# make_cols on empty patch: empty fields
+query TTT
+SELECT (s).p_ops, (s).p_plus_concat, length((s).p_vals)
+FROM (SELECT make_cols('[]', 'p') AS s) t
+----
+(empty)	(empty)	0
+
+# cols_len on empty ops/vals is 0
+query I
+SELECT cols_len('', LIST_VALUE())
+----
+0
+
+# diff_patch with negative counts clamps to 0
+query I
+SELECT diff_patch('abc', '[["=", -2], ["+", "X"]]')
+----
+X
+
+# make_cols handles numeric '+' payload by stringifying
+query II
+SELECT (s).n_plus_concat, list_extract((s).n_vals, 2)
+FROM (SELECT make_cols('[["=", 1], ["+", 123]]', 'n') AS s) t
+----
+123	3
+
+# NULL behavior
+# diff_patch propagates NULL when old is NULL
+query I
+SELECT diff_patch(NULL, '[]')
+----
+NULL
+
+# apply_cols: old NULL -> NULL; NULL ops/plus/vals treated as empty
+query TT
+SELECT apply_cols(NULL, '', '', LIST_VALUE()), apply_cols('abc', NULL, NULL, NULL)
+----
+NULL	NULL
+
+# apply_cols: old NULL but with '+' insert should return inserted text
+query I
+SELECT apply_cols(NULL, '+', 'foo', LIST_VALUE(3))
+----
+foo
