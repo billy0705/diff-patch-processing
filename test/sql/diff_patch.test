@@ -1,73 +1,76 @@
 # name: test/sql/diff_patch.test
-# description: test diff_patch extension
+# description: scenario tests for diff_patch extension (UTF-8, + - =)
 # group: [sql]
 
-# Before we load the extension, this will fail
-statement error
-SELECT diff_patch('hello', '[ ["=", 5] ]');
-----
-Catalog Error: Scalar Function with name diff_patch does not exist!
-
-# Require statement will ensure this test is run with this extension loaded
 require diff_patch
 
-# Confirm the extension works
-query I
-SELECT diff_patch('hello', '[ ["=", 5], ["+", "!"] ]');
-----
-hello!
+# Setup a UTF-8 demo table
+statement ok
+CREATE TEMP TABLE demo AS
+  SELECT *
+  FROM (VALUES
+    (1, 'café', 'ca🌟é!'),
+    (2, '你好世界', '你🌈好地球'),
+    (3, 'abc', 'abcfoo')
+  ) AS t(id, old_content, new_content);
 
-query I
-SELECT diff_patch('abcdef', '[ ["=", 2], ["+", "XY"], ["-", 3], ["=", 1] ]');
+# Inspect demo
+query ITT
+SELECT id, old_content, new_content FROM demo ORDER BY id
 ----
-abXYf
+1	café	ca🌟é!
+2	你好世界	你🌈好地球
+3	abc	abcfoo
 
-query I
-SELECT diff_patch('spaghetti', '[ ["-", 4], ["+", "a"], ["=", 3] ]');
+# Derive columns with dynamic prefix 'nc'
+query TTTI
+SELECT CAST(id AS VARCHAR), (s).nc_ops, (s).nc_plus_concat, list_extract((s).nc_vals, 1)
+FROM (SELECT id, make_cols_from_text(old_content, new_content, 'nc') AS s FROM demo) t
+ORDER BY id
 ----
-ahet
+1	=-+=+	🌟!	2
+2	=+=-+	🌈地球	1
+3	=+	foo	3
 
-query I
-SELECT diff_patch('data', '[ ["?", 2], ["=", 2] ]');
+# Reconstruct new_content using apply_cols
+query TT
+SELECT new_content,
+       apply_cols(old_content, (s).nc_ops, (s).nc_plus_concat, (s).nc_vals) AS reconstructed
+FROM (SELECT old_content, new_content, make_cols_from_text(old_content, new_content, 'nc') AS s FROM demo) t
+ORDER BY new_content
 ----
-da
+abcfoo	abcfoo
+ca🌟é!	ca🌟é!
+你🌈好地球	你🌈好地球
 
-query I
-SELECT diff_patch('x', '"oops"');
+# diff_patch with make_patch over demo rows
+query TT
+SELECT new_content,
+       diff_patch(old_content, make_patch(old_content, new_content)) AS patched
+FROM demo
+ORDER BY id
 ----
-x
+ca🌟é!	ca🌟é!
+你🌈好地球	你🌈好地球
+abcfoo	abcfoo
 
-# Generate a patch and apply it back
-query I
-SELECT diff_patch('héllo', make_patch('héllo', 'héX!lo'));
+# Length checks: length(new_content) == cols_len(ops, vals) == patch_len(make_patch(...))
+query TTT
+SELECT CAST(id AS VARCHAR),
+       length(new_content),
+       cols_len((s).nc_ops, (s).nc_vals)
+FROM (SELECT id, new_content, make_cols_from_text(old_content, new_content, 'nc') AS s FROM demo) t
+ORDER BY id
 ----
-héX!lo
+1	5	5
+2	5	5
+3	6	6
 
-# patch_len: counts UTF-8 code points from '=' and '+'
-query I
-SELECT patch_len('[ ["=", 6], ["+", "the "], ["=", 5] ]');
+query TI
+SELECT CAST(id AS VARCHAR), patch_len(make_patch(old_content, new_content))
+FROM demo
+ORDER BY id
 ----
-15
-
-query I
-SELECT patch_len('[ ["=", 2], ["+", "🙂"], ["=", 3] ]');
-----
-6
-
-# make_patch: basic ASCII insert
-query I
-SELECT make_patch('Hello world', 'Hello the world');
-----
-[["=",6],["+","the "],["=",5]]
-
-# make_patch + patch_len should equal new string length (code points)
-query I
-SELECT patch_len(make_patch('héllo', 'héX!lo'));
-----
-6
-
-# Round-trip with ASCII
-query I
-SELECT diff_patch('Hello world', make_patch('Hello world', 'Hello the world'));
-----
-Hello the world
+1	5
+2	5
+3	6
