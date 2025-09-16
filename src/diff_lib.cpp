@@ -6,6 +6,7 @@
 #include <tuple>
 
 #include "yyjson.hpp"
+#include "include/utf8_utils.hpp"
 using namespace duckdb_yyjson;
 
 namespace diffpatch {
@@ -16,58 +17,7 @@ struct Match {
 	int size;
 };
 
-// UTF-8 decoding to codepoints with byte offsets (sentinel at end)
-static void Utf8ToCodepoints(const std::string &s, std::vector<uint32_t> &out, std::vector<size_t> &byte_offsets) {
-	out.clear();
-	byte_offsets.clear();
-	size_t i = 0, n = s.size();
-	while (i < n) {
-		byte_offsets.push_back(i);
-		unsigned char c = (unsigned char)s[i];
-		uint32_t cp = 0;
-		size_t clen = 1;
-		if (c < 0x80) {
-			cp = c;
-			clen = 1;
-		} else if ((c >> 5) == 0x6 && i + 1 < n) {
-			unsigned char c1 = (unsigned char)s[i + 1];
-			if ((c1 & 0xC0) == 0x80) {
-				cp = ((c & 0x1F) << 6) | (c1 & 0x3F);
-				clen = 2;
-			} else {
-				cp = c;
-				clen = 1;
-			}
-		} else if ((c >> 4) == 0xE && i + 2 < n) {
-			unsigned char c1 = (unsigned char)s[i + 1];
-			unsigned char c2 = (unsigned char)s[i + 2];
-			if (((c1 & 0xC0) == 0x80) && ((c2 & 0xC0) == 0x80)) {
-				cp = ((c & 0x0F) << 12) | ((c1 & 0x3F) << 6) | (c2 & 0x3F);
-				clen = 3;
-			} else {
-				cp = c;
-				clen = 1;
-			}
-		} else if ((c >> 3) == 0x1E && i + 3 < n) {
-			unsigned char c1 = (unsigned char)s[i + 1];
-			unsigned char c2 = (unsigned char)s[i + 2];
-			unsigned char c3 = (unsigned char)s[i + 3];
-			if (((c1 & 0xC0) == 0x80) && ((c2 & 0xC0) == 0x80) && ((c3 & 0xC0) == 0x80)) {
-				cp = ((c & 0x07) << 18) | ((c1 & 0x3F) << 12) | ((c2 & 0x3F) << 6) | (c3 & 0x3F);
-				clen = 4;
-			} else {
-				cp = c;
-				clen = 1;
-			}
-		} else {
-			cp = c;
-			clen = 1; // invalid lead or truncated
-		}
-		out.push_back(cp);
-		i += clen;
-	}
-	byte_offsets.push_back(n); // sentinel: end of string
-}
+// UTF-8 decoding is provided by include/utf8_utils.hpp (Utf8ToCodepoints)
 
 class SequenceMatcher {
 public:
