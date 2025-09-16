@@ -113,7 +113,7 @@ inline void ApplyColsScalarFun(DataChunk &args, ExpressionState &state, Vector &
 
 	// Ensure we are writing into a flat vector
 	result.SetVectorType(VectorType::FLAT_VECTOR);
-    auto out_data = FlatVector::GetData<string_t>(result);
+	auto out_data = FlatVector::GetData<string_t>(result);
 
 	for (idx_t i = 0; i < args.size(); i++) {
 		bool old_is_null = FlatVector::IsNull(old_col, i);
@@ -121,36 +121,36 @@ inline void ApplyColsScalarFun(DataChunk &args, ExpressionState &state, Vector &
 		bool plus_is_null = FlatVector::IsNull(plus_col, i);
 		bool vals_is_null = FlatVector::IsNull(vals_col, i);
 
-        // If any of ops/plus/vals is NULL → result is NULL
-        if (ops_is_null || plus_is_null || vals_is_null) {
-            FlatVector::SetNull(result, i, true);
-            continue;
-        }
+		// If any of ops/plus/vals is NULL → result is NULL
+		if (ops_is_null || plus_is_null || vals_is_null) {
+			FlatVector::SetNull(result, i, true);
+			continue;
+		}
 
-        std::string ops_s = ops_data[i].GetString();
-        std::string plus_s = plus_data[i].GetString();
+		std::string ops_s = ops_data[i].GetString();
+		std::string plus_s = plus_data[i].GetString();
 
-        std::vector<int64_t> vals;
-        {
-            auto entry = list_entries[i];
-            vals.reserve(entry.length);
-            for (idx_t j = 0; j < entry.length; j++) {
-                vals.push_back(vals_child_data[entry.offset + j]);
-            }
-        }
+		std::vector<int64_t> vals;
+		{
+			auto entry = list_entries[i];
+			vals.reserve(entry.length);
+			for (idx_t j = 0; j < entry.length; j++) {
+				vals.push_back(vals_child_data[entry.offset + j]);
+			}
+		}
 
 		// Special rule: if old is NULL but we have non-empty ops/plus/vals
 		// then treat old as empty string and compute; only return NULL when
 		// old is NULL AND ops/plus/vals are all empty.
-        if (old_is_null) {
-            bool ops_empty = ops_s.empty();
-            bool plus_empty = plus_s.empty();
-            bool vals_empty = vals.empty();
-            if (ops_empty && plus_empty && vals_empty) {
-                FlatVector::SetNull(result, i, true);
-                continue;
-            }
-        }
+		if (old_is_null) {
+			bool ops_empty = ops_s.empty();
+			bool plus_empty = plus_s.empty();
+			bool vals_empty = vals.empty();
+			if (ops_empty && plus_empty && vals_empty) {
+				FlatVector::SetNull(result, i, true);
+				continue;
+			}
+		}
 
 		std::string old_s = old_is_null ? std::string() : old_data[i].GetString();
 
