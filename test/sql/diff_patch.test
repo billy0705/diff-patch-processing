@@ -77,7 +77,7 @@ ORDER BY id
 
 # ---------------- Edge Cases: UTF-8 / NULL / Empty Patch ----------------
 
-# 空補丁 JSON → 空字串；長度 0
+# Empty patch JSON -> empty string; length 0
 query IT
 SELECT diff_patch('abc', '[]'), patch_len('[]')
 ----
@@ -110,20 +110,50 @@ FROM (SELECT make_cols('[["=", 1], ["+", 123]]', 'n') AS s) t
 123	3
 
 # NULL behavior
-# diff_patch propagates NULL when old is NULL
+# diff_patch: empty patch returns empty string (no change)
 query I
-SELECT diff_patch(NULL, '[]')
+SELECT diff_patch('foo', '[]')
 ----
-NULL
+(empty)
 
-# apply_cols: old NULL -> NULL; NULL ops/plus/vals treated as empty
+# apply_cols: old NULL + empty ops -> (empty); any NULL among ops/plus/vals -> NULL
 query TT
 SELECT apply_cols(NULL, '', '', LIST_VALUE()), apply_cols('abc', NULL, NULL, NULL)
 ----
-NULL	NULL
+(empty)	NULL
 
-# apply_cols: old NULL but with '+' insert should return inserted text
+# apply_cols: old NULL with '+' should return inserted text
 query I
 SELECT apply_cols(NULL, '+', 'foo', LIST_VALUE(3))
 ----
 foo
+
+# diff_patch: old NULL with '+' should return inserted text
+query I
+SELECT diff_patch(NULL, '[["+", "foo"]]')
+----
+foo
+
+# make_patch: old NULL and new 'foo' -> insertion patch
+query I
+SELECT make_patch(NULL, 'foo')
+----
+[["+","foo"]]
+
+# make_cols_from_text: old NULL and new 'foo' -> '+' columns
+query I
+SELECT make_cols_from_text(NULL, 'foo', 'nc')
+----
+{'nc_ops': +, 'nc_plus_concat': foo, 'nc_vals': [3]}
+
+# make_patch: new NULL -> empty patch []
+query I
+SELECT make_patch('foo', NULL)
+----
+[]
+
+# make_cols_from_text: new NULL -> empty columns
+query I
+SELECT make_cols_from_text('foo', NULL, 'nc')
+----
+{'nc_ops': '', 'nc_plus_concat': '', 'nc_vals': []}
