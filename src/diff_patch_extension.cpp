@@ -34,6 +34,10 @@ inline void DiffPatchScalarFun(DataChunk &args, ExpressionState &state, Vector &
 	auto &old_col = args.data[0];
 	auto &patch_col = args.data[1];
 
+	// Ensure we operate on flat vectors to avoid invalid string_t access
+	old_col.Flatten(args.size());
+	patch_col.Flatten(args.size());
+
 	result.SetVectorType(VectorType::FLAT_VECTOR);
 	auto out_data = FlatVector::GetData<string_t>(result);
 
