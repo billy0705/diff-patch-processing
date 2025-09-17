@@ -29,58 +29,60 @@ namespace duckdb {
 // UTF-8 helpers are now provided by include/utf8_utils.hpp
 
 inline void DiffPatchScalarFun(DataChunk &args, ExpressionState &state, Vector &result) {
-    // Implements patch_decompress2(old, js) where js is a JSON
-    // array like: [["=", 5], ["+", "foo"], ["-", 2], ...]
-    auto &old_col = args.data[0];
-    auto &patch_col = args.data[1];
+	// Implements patch_decompress2(old, js) where js is a JSON
+	// array like: [["=", 5], ["+", "foo"], ["-", 2], ...]
+	auto &old_col = args.data[0];
+	auto &patch_col = args.data[1];
 
-    result.SetVectorType(VectorType::FLAT_VECTOR);
-    auto out_data = FlatVector::GetData<string_t>(result);
+	result.SetVectorType(VectorType::FLAT_VECTOR);
+	auto out_data = FlatVector::GetData<string_t>(result);
 
-    for (idx_t i = 0; i < args.size(); i++) {
-        bool old_is_null = FlatVector::IsNull(old_col, i);
-        bool patch_is_null = FlatVector::IsNull(patch_col, i);
+	for (idx_t i = 0; i < args.size(); i++) {
+		bool old_is_null = FlatVector::IsNull(old_col, i);
+		bool patch_is_null = FlatVector::IsNull(patch_col, i);
 
-        if (patch_is_null) {
-            if (old_is_null) {
-                FlatVector::SetNull(result, i, true);
-            } else {
-                auto old_t = FlatVector::GetData<string_t>(old_col)[i];
-                out_data[i] = StringVector::AddString(result, old_t.GetString());
-            }
-            continue;
-        }
+		if (patch_is_null) {
+			if (old_is_null) {
+				FlatVector::SetNull(result, i, true);
+			} else {
+				auto old_t = FlatVector::GetData<string_t>(old_col)[i];
+				out_data[i] = StringVector::AddString(result, old_t.GetString());
+			}
+			continue;
+		}
 
-        std::string old_str = old_is_null ? std::string() : FlatVector::GetData<string_t>(old_col)[i].GetString();
-        std::string patch_str = FlatVector::GetData<string_t>(patch_col)[i].GetString();
+		std::string old_str = old_is_null ? std::string() : FlatVector::GetData<string_t>(old_col)[i].GetString();
+		std::string patch_str = FlatVector::GetData<string_t>(patch_col)[i].GetString();
 
-        std::vector<patchjson::PatchOp> ops;
-        if (!patchjson::ParsePatchJSON(patch_str, ops)) {
-            out_data[i] = StringVector::AddString(result, old_str);
-            continue;
-        }
+		std::vector<patchjson::PatchOp> ops;
+		if (!patchjson::ParsePatchJSON(patch_str, ops)) {
+			out_data[i] = StringVector::AddString(result, old_str);
+			continue;
+		}
 
-        size_t idx_b = 0;
-        std::string out;
-        out.reserve(old_str.size() + 64);
-        for (auto &op : ops) {
-            if (op.tag == '=') {
-                size_t bytes_to_take = Utf8AdvanceBytes(old_str, idx_b, (size_t)op.count);
-                size_t remain_bytes = old_str.size() - idx_b;
-                if (bytes_to_take > remain_bytes) bytes_to_take = remain_bytes;
-                out.append(old_str.data() + idx_b, bytes_to_take);
-                idx_b += bytes_to_take;
-            } else if (op.tag == '+') {
-                out.append(op.insert);
-            } else if (op.tag == '-') {
-                size_t bytes_to_skip = Utf8AdvanceBytes(old_str, idx_b, (size_t)op.count);
-                size_t remain_bytes = old_str.size() - idx_b;
-                if (bytes_to_skip > remain_bytes) bytes_to_skip = remain_bytes;
-                idx_b += bytes_to_skip;
-            }
-        }
-        out_data[i] = StringVector::AddString(result, out);
-    }
+		size_t idx_b = 0;
+		std::string out;
+		out.reserve(old_str.size() + 64);
+		for (auto &op : ops) {
+			if (op.tag == '=') {
+				size_t bytes_to_take = Utf8AdvanceBytes(old_str, idx_b, (size_t)op.count);
+				size_t remain_bytes = old_str.size() - idx_b;
+				if (bytes_to_take > remain_bytes)
+					bytes_to_take = remain_bytes;
+				out.append(old_str.data() + idx_b, bytes_to_take);
+				idx_b += bytes_to_take;
+			} else if (op.tag == '+') {
+				out.append(op.insert);
+			} else if (op.tag == '-') {
+				size_t bytes_to_skip = Utf8AdvanceBytes(old_str, idx_b, (size_t)op.count);
+				size_t remain_bytes = old_str.size() - idx_b;
+				if (bytes_to_skip > remain_bytes)
+					bytes_to_skip = remain_bytes;
+				idx_b += bytes_to_skip;
+			}
+		}
+		out_data[i] = StringVector::AddString(result, out);
+	}
 }
 
 inline void PatchLenScalarFun(DataChunk &args, ExpressionState &state, Vector &result) {
@@ -154,9 +156,9 @@ inline void ApplyColsScalarFun(DataChunk &args, ExpressionState &state, Vector &
 			}
 		}
 
-        // Special rule: if old is NULL we still compute result with old treated
-        // as empty string. This makes apply_cols(NULL, '+', 'foo', [3]) -> 'foo'
-        // and apply_cols(NULL, '', '', []) -> '' (empty string), not NULL.
+		// Special rule: if old is NULL we still compute result with old treated
+		// as empty string. This makes apply_cols(NULL, '+', 'foo', [3]) -> 'foo'
+		// and apply_cols(NULL, '', '', []) -> '' (empty string), not NULL.
 
 		std::string old_s = old_is_null ? std::string() : old_data[i].GetString();
 
@@ -409,20 +411,20 @@ inline void MakeColsFromTextFun(DataChunk &args, ExpressionState &state, Vector 
 
 	idx_t current_list_size = ListVector::GetListSize(vals_vec);
 
-    for (idx_t i = 0; i < count; i++) {
-        bool old_is_null = FlatVector::IsNull(old_col, i);
-        bool new_is_null = FlatVector::IsNull(new_col, i);
-        if (new_is_null) {
-            // new=NULL => no change: output empty fields
-            ops_data[i] = StringVector::AddString(ops_vec, "");
-            plus_data[i] = StringVector::AddString(plus_vec, "");
-            list_entries[i].offset = current_list_size;
-            list_entries[i].length = 0;
-            continue;
-        }
-        std::string old_s = old_is_null ? std::string() : FlatVector::GetData<string_t>(old_col)[i].GetString();
-        std::string new_s = FlatVector::GetData<string_t>(new_col)[i].GetString();
-        std::string patch_json = diffpatch::GeneratePatchJson(old_s, new_s, false, nullptr);
+	for (idx_t i = 0; i < count; i++) {
+		bool old_is_null = FlatVector::IsNull(old_col, i);
+		bool new_is_null = FlatVector::IsNull(new_col, i);
+		if (new_is_null) {
+			// new=NULL => no change: output empty fields
+			ops_data[i] = StringVector::AddString(ops_vec, "");
+			plus_data[i] = StringVector::AddString(plus_vec, "");
+			list_entries[i].offset = current_list_size;
+			list_entries[i].length = 0;
+			continue;
+		}
+		std::string old_s = old_is_null ? std::string() : FlatVector::GetData<string_t>(old_col)[i].GetString();
+		std::string new_s = FlatVector::GetData<string_t>(new_col)[i].GetString();
+		std::string patch_json = diffpatch::GeneratePatchJson(old_s, new_s, false, nullptr);
 
 		std::string ops, plus_concat;
 		std::vector<int64_t> vals;
@@ -448,9 +450,9 @@ inline void MakeColsFromTextFun(DataChunk &args, ExpressionState &state, Vector 
 
 static void LoadInternal(DatabaseInstance &instance) {
 	// Register a scalar function
-    auto diff_patch_scalar_function = ScalarFunction("diff_patch", {LogicalType::VARCHAR, LogicalType::VARCHAR},
-                                                     LogicalType::VARCHAR, DiffPatchScalarFun);
-    diff_patch_scalar_function.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
+	auto diff_patch_scalar_function = ScalarFunction("diff_patch", {LogicalType::VARCHAR, LogicalType::VARCHAR},
+	                                                 LogicalType::VARCHAR, DiffPatchScalarFun);
+	diff_patch_scalar_function.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
 	ExtensionUtil::RegisterFunction(instance, diff_patch_scalar_function);
 
 	// Register patch_len(patch_json) -> BIGINT
@@ -459,31 +461,33 @@ static void LoadInternal(DatabaseInstance &instance) {
 	ExtensionUtil::RegisterFunction(instance, patch_len_scalar_function);
 
 	// Register make_patch(old, new) -> VARCHAR(JSON)
-    auto make_patch_scalar_function =
-        ScalarFunction("make_patch", {LogicalType::VARCHAR, LogicalType::VARCHAR}, LogicalType::VARCHAR,
-                       [](DataChunk &args, ExpressionState &state, Vector &result) {
-                           auto &old_col = args.data[0];
-                           auto &new_col = args.data[1];
-                           result.SetVectorType(VectorType::FLAT_VECTOR);
-                           auto out_data = FlatVector::GetData<string_t>(result);
-                           for (idx_t i = 0; i < args.size(); i++) {
-                               bool old_is_null = FlatVector::IsNull(old_col, i);
-                               bool new_is_null = FlatVector::IsNull(new_col, i);
-                               std::string js;
-                               if (new_is_null) {
-                                   // new=NULL => treat as no change
-                                   js = "[]";
-                               } else {
-                                   std::string old_s = old_is_null ? std::string() : FlatVector::GetData<string_t>(old_col)[i].GetString();
-                                   std::string new_s = FlatVector::GetData<string_t>(new_col)[i].GetString();
-                                   js = diffpatch::GeneratePatchJson(old_s, new_s, false, nullptr);
-                               }
-                               out_data[i] = StringVector::AddString(result, js);
-                           }
-                       });
-    // Handle NULLs manually to allow treating NULL as empty string
-    make_patch_scalar_function.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
-    ExtensionUtil::RegisterFunction(instance, make_patch_scalar_function);
+	auto make_patch_scalar_function =
+	    ScalarFunction("make_patch", {LogicalType::VARCHAR, LogicalType::VARCHAR}, LogicalType::VARCHAR,
+	                   [](DataChunk &args, ExpressionState &state, Vector &result) {
+		                   auto &old_col = args.data[0];
+		                   auto &new_col = args.data[1];
+		                   result.SetVectorType(VectorType::FLAT_VECTOR);
+		                   auto out_data = FlatVector::GetData<string_t>(result);
+		                   for (idx_t i = 0; i < args.size(); i++) {
+			                   bool old_is_null = FlatVector::IsNull(old_col, i);
+			                   bool new_is_null = FlatVector::IsNull(new_col, i);
+			                   std::string js;
+			                   if (new_is_null) {
+				                   // new=NULL => treat as no change
+				                   js = "[]";
+			                   } else {
+				                   std::string old_s = old_is_null
+				                                           ? std::string()
+				                                           : FlatVector::GetData<string_t>(old_col)[i].GetString();
+				                   std::string new_s = FlatVector::GetData<string_t>(new_col)[i].GetString();
+				                   js = diffpatch::GeneratePatchJson(old_s, new_s, false, nullptr);
+			                   }
+			                   out_data[i] = StringVector::AddString(result, js);
+		                   }
+	                   });
+	// Handle NULLs manually to allow treating NULL as empty string
+	make_patch_scalar_function.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
+	ExtensionUtil::RegisterFunction(instance, make_patch_scalar_function);
 
 	// Register make_cols(patch_json, new_col_name) with dynamic field names
 	{
