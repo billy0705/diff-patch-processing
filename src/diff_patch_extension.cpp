@@ -71,8 +71,32 @@ inline void DiffPatchScalarFun(DataChunk &args, ExpressionState &state, Vector &
 		idx_t old_cplen = old_offs.empty() ? 0 : (idx_t)old_offs.size() - 1;
 		idx_t old_cp = 0;
 
+		// Precise reserve: sum '=' bytes (+) '+' bytes
+		size_t total_bytes = 0;
+		for (auto &op : ops) {
+			if (op.tag == '=') {
+				idx_t take = (idx_t)op.count;
+				if (take < 0)
+					take = 0;
+				if (old_cp + take > old_cplen)
+					take = old_cplen - old_cp;
+				if (take > 0)
+					total_bytes += old_offs[old_cp + take] - old_offs[old_cp];
+				old_cp += take;
+			} else if (op.tag == '+') {
+				total_bytes += op.insert.size();
+			} else if (op.tag == '-') {
+				idx_t skip = (idx_t)op.count;
+				if (skip < 0)
+					skip = 0;
+				if (old_cp + skip > old_cplen)
+					skip = old_cplen - old_cp;
+				old_cp += skip;
+			}
+		}
 		std::string out;
-		out.reserve(old_str.size() + 64);
+		out.reserve(total_bytes);
+		old_cp = 0;
 		for (auto &op : ops) {
 			if (op.tag == '=') {
 				idx_t take = (idx_t)op.count;
@@ -180,57 +204,144 @@ inline void ApplyColsScalarFun(DataChunk &args, ExpressionState &state, Vector &
 
 		std::string old_s = old_is_null ? std::string() : old_data[i].GetString();
 
-		// Build codepoint->byte offsets for fast slicing
+		// Conditional offset tables
+		bool need_old_offs2 = false, need_plus_offs = false;
+		for (char c : ops_s) {
+			if (c == '=' || c == '-')
+				need_old_offs2 = true;
+			if (c == '+')
+				need_plus_offs = true;
+		}
 		std::vector<uint32_t> d1, d2;
 		std::vector<size_t> old_offs2, plus_offs;
-		Utf8ToCodepoints(old_s, d1, old_offs2);
-		Utf8ToCodepoints(plus_s, d2, plus_offs);
-		idx_t old_cplen2 = old_offs2.empty() ? 0 : (idx_t)old_offs2.size() - 1;
-		idx_t plus_cplen = plus_offs.empty() ? 0 : (idx_t)plus_offs.size() - 1;
-		idx_t old_cp2 = 0;
+		idx_t old_cplen2 = 0, plus_cplen = 0;
+		if (need_old_offs2) {
+			Utf8ToCodepoints(old_s, d1, old_offs2);
+			old_cplen2 = old_offs2.empty() ? 0 : (idx_t)old_offs2.size() - 1;
+		}
+		if (need_plus_offs) {
+			Utf8ToCodepoints(plus_s, d2, plus_offs);
+			plus_cplen = plus_offs.empty() ? 0 : (idx_t)plus_offs.size() - 1;
+		}
+		idx_t old_cp2 = 0;     // codepoint idx if need_old_offs2, else reused as byte idx
 		idx_t ins_cp_idx2 = 0; // cumulative cp consumed from plus_s
 
-		std::string out;
-		out.reserve(old_s.size() + plus_s.size());
-
-		// iterate operations; vals should have same length
+		// Precise reserve for apply_cols
+		size_t total_bytes2 = 0;
+		// temp indices for estimation
+		idx_t est_old_cp = 0;
+		idx_t est_ins_cp = 0;
+		size_t est_old_byte = 0;
+		size_t est_plus_byte = 0;
 		size_t nops = ops_s.size();
 		size_t nvals = vals.size();
 		size_t steps = std::min(nops, nvals);
 		for (size_t k = 0; k < steps; k++) {
 			char op = ops_s[k];
 			int64_t v = vals[k];
+			if (v < 0)
+				v = 0;
+			if (op == '=') {
+				if (need_old_offs2) {
+					idx_t take = (idx_t)v;
+					if (est_old_cp + take > old_cplen2)
+						take = old_cplen2 - est_old_cp;
+					if (take > 0)
+						total_bytes2 += old_offs2[est_old_cp + take] - old_offs2[est_old_cp];
+					est_old_cp += take;
+				} else {
+					size_t bytes = Utf8AdvanceBytes(old_s, est_old_byte, (size_t)v);
+					total_bytes2 += bytes;
+				}
+			} else if (op == '-') {
+				if (need_old_offs2) {
+					est_old_cp += (idx_t)v;
+					if (est_old_cp > old_cplen2)
+						est_old_cp = old_cplen2;
+				} else {
+					Utf8AdvanceBytes(old_s, est_old_byte, (size_t)v);
+				}
+			} else if (op == '+') {
+				size_t end_cp = (size_t)v;
+				if (need_plus_offs) {
+					if (end_cp > (size_t)plus_cplen)
+						end_cp = plus_cplen;
+					if (end_cp > (size_t)est_ins_cp)
+						total_bytes2 += plus_offs[end_cp] - plus_offs[est_ins_cp];
+					est_ins_cp = (idx_t)end_cp;
+				} else {
+					if (end_cp > (size_t)est_ins_cp) {
+						size_t seg = end_cp - (size_t)est_ins_cp;
+						size_t bytes = Utf8AdvanceBytes(plus_s, est_plus_byte, seg);
+						total_bytes2 += bytes;
+						est_ins_cp = (idx_t)end_cp;
+					}
+				}
+			}
+		}
+		std::string out;
+		out.reserve(total_bytes2);
+
+		// iterate operations; vals should have same length
+		for (size_t k = 0; k < steps; k++) {
+			char op = ops_s[k];
+			int64_t v = vals[k];
 			if (op == '=') {
 				if (v < 0)
 					v = 0;
-				idx_t take = (idx_t)v;
-				if (old_cp2 + take > old_cplen2)
-					take = old_cplen2 - old_cp2;
-				if (take > 0) {
-					size_t b0 = old_offs2[old_cp2];
-					size_t b1 = old_offs2[old_cp2 + take];
-					out.append(old_s.data() + b0, b1 - b0);
-					old_cp2 += take;
+				if (need_old_offs2) {
+					idx_t take = (idx_t)v;
+					if (old_cp2 + take > old_cplen2)
+						take = old_cplen2 - old_cp2;
+					if (take > 0) {
+						size_t b0 = old_offs2[old_cp2];
+						size_t b1 = old_offs2[old_cp2 + take];
+						out.append(old_s.data() + b0, b1 - b0);
+						old_cp2 += take;
+					}
+				} else {
+					size_t bytes = Utf8AdvanceBytes(old_s, (size_t &)old_cp2, (size_t)v);
+					if (bytes > 0) {
+						out.append(old_s.data() + (size_t)old_cp2, bytes);
+						old_cp2 += (idx_t)bytes;
+					}
 				}
 			} else if (op == '-') {
 				if (v < 0)
 					v = 0;
-				idx_t skip = (idx_t)v;
-				if (old_cp2 + skip > old_cplen2)
-					skip = old_cplen2 - old_cp2;
-				old_cp2 += skip;
+				if (need_old_offs2) {
+					idx_t skip = (idx_t)v;
+					if (old_cp2 + skip > old_cplen2)
+						skip = old_cplen2 - old_cp2;
+					old_cp2 += skip;
+				} else {
+					Utf8AdvanceBytes(old_s, (size_t &)old_cp2, (size_t)v);
+				}
 			} else if (op == '+') {
 				// v is the cumulative codepoint end position in plus_s after this insertion
 				if (v < 0)
 					v = 0;
 				size_t end_cp = (size_t)v;
-				if (end_cp > (size_t)plus_cplen)
-					end_cp = plus_cplen;
-				if (end_cp > (size_t)ins_cp_idx2) {
-					size_t b0 = plus_offs[ins_cp_idx2];
-					size_t b1 = plus_offs[end_cp];
-					out.append(plus_s.data() + b0, b1 - b0);
-					ins_cp_idx2 = (idx_t)end_cp;
+				if (need_plus_offs) {
+					if (end_cp > (size_t)plus_cplen)
+						end_cp = plus_cplen;
+					if (end_cp > (size_t)ins_cp_idx2) {
+						size_t b0 = plus_offs[ins_cp_idx2];
+						size_t b1 = plus_offs[end_cp];
+						out.append(plus_s.data() + b0, b1 - b0);
+						ins_cp_idx2 = (idx_t)end_cp;
+					}
+				} else {
+					static thread_local size_t plus_byte_idx_dummy = 0;
+					if (end_cp > (size_t)ins_cp_idx2) {
+						size_t seg_cp = end_cp - (size_t)ins_cp_idx2;
+						size_t bytes = Utf8AdvanceBytes(plus_s, plus_byte_idx_dummy, seg_cp);
+						if (bytes > 0) {
+							out.append(plus_s.data() + plus_byte_idx_dummy, bytes);
+							plus_byte_idx_dummy += bytes;
+							ins_cp_idx2 = (idx_t)end_cp;
+						}
+					}
 				}
 			} else {
 				// ignore unknown op
@@ -324,19 +435,11 @@ static unique_ptr<FunctionData> MakeColsBind(ClientContext &context, ScalarFunct
 	if (arguments.size() != 2) {
 		throw BinderException("make_cols expects (patch_json, new_col_name)");
 	}
-	string base = "col";
-	if (arguments[1]->expression_class == ExpressionClass::BOUND_CONSTANT) {
-		auto &cexpr = arguments[1]->Cast<BoundConstantExpression>();
-		if (!cexpr.value.IsNull()) {
-			base = cexpr.value.GetValue<string>();
-		}
-	} else {
-		throw BinderException("make_cols: new_col_name must be a constant string");
-	}
+	// Ignore the provided prefix argument; use fixed field names
 	child_list_t<LogicalType> struct_children;
-	struct_children.emplace_back(base + "_ops", LogicalType::VARCHAR);
-	struct_children.emplace_back(base + "_plus_concat", LogicalType::VARCHAR);
-	struct_children.emplace_back(base + "_vals", LogicalType::LIST(LogicalType::BIGINT));
+	struct_children.emplace_back("_ops", LogicalType::VARCHAR);
+	struct_children.emplace_back("_plus_concat", LogicalType::VARCHAR);
+	struct_children.emplace_back("_vals", LogicalType::LIST(LogicalType::BIGINT));
 	bound_function.return_type = LogicalType::STRUCT(std::move(struct_children));
 	return nullptr;
 }
@@ -441,19 +544,11 @@ static unique_ptr<FunctionData> MakeColsFromTextBind(ClientContext &context, Sca
 	if (arguments.size() != 3) {
 		throw BinderException("make_cols_from_text expects (old_content, new_content, new_col_name)");
 	}
-	string base = "col";
-	if (arguments[2]->expression_class == ExpressionClass::BOUND_CONSTANT) {
-		auto &cexpr = arguments[2]->Cast<BoundConstantExpression>();
-		if (!cexpr.value.IsNull()) {
-			base = cexpr.value.GetValue<string>();
-		}
-	} else {
-		throw BinderException("make_cols_from_text: new_col_name must be a constant string");
-	}
+	// Ignore the provided prefix argument; use fixed field names
 	child_list_t<LogicalType> struct_children;
-	struct_children.emplace_back(base + "_ops", LogicalType::VARCHAR);
-	struct_children.emplace_back(base + "_plus_concat", LogicalType::VARCHAR);
-	struct_children.emplace_back(base + "_vals", LogicalType::LIST(LogicalType::BIGINT));
+	struct_children.emplace_back("_ops", LogicalType::VARCHAR);
+	struct_children.emplace_back("_plus_concat", LogicalType::VARCHAR);
+	struct_children.emplace_back("_vals", LogicalType::LIST(LogicalType::BIGINT));
 	bound_function.return_type = LogicalType::STRUCT(std::move(struct_children));
 	return nullptr;
 }
