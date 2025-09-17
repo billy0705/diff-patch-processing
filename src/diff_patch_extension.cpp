@@ -59,6 +59,10 @@ inline void DiffPatchScalarFun(DataChunk &args, ExpressionState &state, Vector &
 			out_data[i] = StringVector::AddString(result, old_str);
 			continue;
 		}
+		if (ops.empty()) {
+			FlatVector::SetNull(result, i, true);
+			continue;
+		}
 
 		size_t idx_b = 0;
 		std::string out;
@@ -156,9 +160,11 @@ inline void ApplyColsScalarFun(DataChunk &args, ExpressionState &state, Vector &
 			}
 		}
 
-		// Special rule: if old is NULL we still compute result with old treated
-		// as empty string. This makes apply_cols(NULL, '+', 'foo', [3]) -> 'foo'
-		// and apply_cols(NULL, '', '', []) -> '' (empty string), not NULL.
+		// If old is NULL and ops/plus/vals are all empty, return NULL
+		if (old_is_null && ops_s.empty() && plus_s.empty() && vals.empty()) {
+			FlatVector::SetNull(result, i, true);
+			continue;
+		}
 
 		std::string old_s = old_is_null ? std::string() : old_data[i].GetString();
 
