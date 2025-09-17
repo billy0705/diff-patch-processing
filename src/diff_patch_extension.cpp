@@ -64,25 +64,37 @@ inline void DiffPatchScalarFun(DataChunk &args, ExpressionState &state, Vector &
 			continue;
 		}
 
-		size_t idx_b = 0;
+		// Build codepoint->byte offsets for old_str to avoid per-step scans
+		std::vector<uint32_t> dummy_cp;
+		std::vector<size_t> old_offs;
+		Utf8ToCodepoints(old_str, dummy_cp, old_offs);
+		idx_t old_cplen = old_offs.empty() ? 0 : (idx_t)old_offs.size() - 1;
+		idx_t old_cp = 0;
+
 		std::string out;
 		out.reserve(old_str.size() + 64);
 		for (auto &op : ops) {
 			if (op.tag == '=') {
-				size_t bytes_to_take = Utf8AdvanceBytes(old_str, idx_b, (size_t)op.count);
-				size_t remain_bytes = old_str.size() - idx_b;
-				if (bytes_to_take > remain_bytes)
-					bytes_to_take = remain_bytes;
-				out.append(old_str.data() + idx_b, bytes_to_take);
-				idx_b += bytes_to_take;
+				idx_t take = (idx_t)op.count;
+				if (take < 0)
+					take = 0;
+				if (old_cp + take > old_cplen)
+					take = old_cplen - old_cp;
+				if (take > 0) {
+					size_t b0 = old_offs[old_cp];
+					size_t b1 = old_offs[old_cp + take];
+					out.append(old_str.data() + b0, b1 - b0);
+					old_cp += take;
+				}
 			} else if (op.tag == '+') {
 				out.append(op.insert);
 			} else if (op.tag == '-') {
-				size_t bytes_to_skip = Utf8AdvanceBytes(old_str, idx_b, (size_t)op.count);
-				size_t remain_bytes = old_str.size() - idx_b;
-				if (bytes_to_skip > remain_bytes)
-					bytes_to_skip = remain_bytes;
-				idx_b += bytes_to_skip;
+				idx_t skip = (idx_t)op.count;
+				if (skip < 0)
+					skip = 0;
+				if (old_cp + skip > old_cplen)
+					skip = old_cplen - old_cp;
+				old_cp += skip;
 			}
 		}
 		out_data[i] = StringVector::AddString(result, out);
@@ -168,10 +180,16 @@ inline void ApplyColsScalarFun(DataChunk &args, ExpressionState &state, Vector &
 
 		std::string old_s = old_is_null ? std::string() : old_data[i].GetString();
 
-		// Use byte indices + Utf8AdvanceBytes scanning
-		size_t old_idx = 0;       // byte index into old_s
-		size_t ins_cp_idx = 0;    // cumulative cp consumed from plus_s
-		size_t plus_byte_idx = 0; // byte index into plus_s corresponding to ins_cp_idx
+		// Build codepoint->byte offsets for fast slicing
+		std::vector<uint32_t> d1, d2;
+		std::vector<size_t> old_offs2, plus_offs;
+		Utf8ToCodepoints(old_s, d1, old_offs2);
+		Utf8ToCodepoints(plus_s, d2, plus_offs);
+		idx_t old_cplen2 = old_offs2.empty() ? 0 : (idx_t)old_offs2.size() - 1;
+		idx_t plus_cplen = plus_offs.empty() ? 0 : (idx_t)plus_offs.size() - 1;
+		idx_t old_cp2 = 0;
+		idx_t ins_cp_idx2 = 0; // cumulative cp consumed from plus_s
+
 		std::string out;
 		out.reserve(old_s.size() + plus_s.size());
 
@@ -185,29 +203,34 @@ inline void ApplyColsScalarFun(DataChunk &args, ExpressionState &state, Vector &
 			if (op == '=') {
 				if (v < 0)
 					v = 0;
-				size_t bytes = Utf8AdvanceBytes(old_s, old_idx, (size_t)v);
-				if (bytes > 0) {
-					out.append(old_s.data() + old_idx, bytes);
-					old_idx += bytes;
+				idx_t take = (idx_t)v;
+				if (old_cp2 + take > old_cplen2)
+					take = old_cplen2 - old_cp2;
+				if (take > 0) {
+					size_t b0 = old_offs2[old_cp2];
+					size_t b1 = old_offs2[old_cp2 + take];
+					out.append(old_s.data() + b0, b1 - b0);
+					old_cp2 += take;
 				}
 			} else if (op == '-') {
 				if (v < 0)
 					v = 0;
-				size_t bytes = Utf8AdvanceBytes(old_s, old_idx, (size_t)v);
-				old_idx += bytes;
+				idx_t skip = (idx_t)v;
+				if (old_cp2 + skip > old_cplen2)
+					skip = old_cplen2 - old_cp2;
+				old_cp2 += skip;
 			} else if (op == '+') {
 				// v is the cumulative codepoint end position in plus_s after this insertion
 				if (v < 0)
 					v = 0;
 				size_t end_cp = (size_t)v;
-				if (end_cp > ins_cp_idx) {
-					size_t seg_cp = end_cp - ins_cp_idx;
-					size_t bytes = Utf8AdvanceBytes(plus_s, plus_byte_idx, seg_cp);
-					if (bytes > 0) {
-						out.append(plus_s.data() + plus_byte_idx, bytes);
-						plus_byte_idx += bytes;
-						ins_cp_idx = end_cp;
-					}
+				if (end_cp > (size_t)plus_cplen)
+					end_cp = plus_cplen;
+				if (end_cp > (size_t)ins_cp_idx2) {
+					size_t b0 = plus_offs[ins_cp_idx2];
+					size_t b1 = plus_offs[end_cp];
+					out.append(plus_s.data() + b0, b1 - b0);
+					ins_cp_idx2 = (idx_t)end_cp;
 				}
 			} else {
 				// ignore unknown op
