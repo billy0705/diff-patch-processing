@@ -359,40 +359,80 @@ inline void MakeColsNamedFun(DataChunk &args, ExpressionState &state, Vector &re
 	auto &vals_child = ListVector::GetEntry(vals_vec);
 	auto vals_child_data = FlatVector::GetData<int64_t>(vals_child);
 
-	idx_t current_list_size = ListVector::GetListSize(vals_vec);
-
+	// Prepass: parse and collect per-row ops for single Reserve
+	std::vector<std::vector<patchjson::PatchOp>> row_ops(count);
+	std::vector<idx_t> row_val_len(count, 0);
+	std::vector<size_t> row_plus_bytes(count, 0);
+	idx_t total_vals = 0;
 	for (idx_t i = 0; i < count; i++) {
-		if (FlatVector::IsNull(patch_col, i)) {
+		if (FlatVector::IsNull(patch_col, i))
+			continue;
+		auto patch_str_t = FlatVector::GetData<string_t>(patch_col)[i];
+		std::string patch_json = patch_str_t.GetString();
+		if (!patchjson::ParsePatchJSON(patch_json, row_ops[i]))
+			continue;
+		idx_t vals_len = 0;
+		size_t plus_bytes = 0;
+		for (auto &op : row_ops[i]) {
+			if (op.tag == '+' || op.tag == '-' || op.tag == '=') {
+				vals_len++;
+			}
+			if (op.tag == '+')
+				plus_bytes += op.insert.size();
+		}
+		row_val_len[i] = vals_len;
+		row_plus_bytes[i] = plus_bytes;
+		total_vals += vals_len;
+	}
+	// Reserve once for LIST child
+	if (total_vals > 0) {
+		ListVector::Reserve(vals_vec, total_vals);
+		ListVector::SetListSize(vals_vec, total_vals);
+		// reacquire child pointer after reserve
+		vals_child_data = FlatVector::GetData<int64_t>(vals_child);
+	}
+	idx_t running_offset = 0;
+	for (idx_t i = 0; i < count; i++) {
+		if (FlatVector::IsNull(patch_col, i) || row_ops[i].empty()) {
 			ops_data[i] = StringVector::AddString(ops_vec, "");
 			plus_data[i] = StringVector::AddString(plus_vec, "");
-			list_entries[i].offset = current_list_size;
+			list_entries[i].offset = running_offset;
 			list_entries[i].length = 0;
 			continue;
 		}
-		auto patch_str_t = FlatVector::GetData<string_t>(patch_col)[i];
-		std::string patch_json = patch_str_t.GetString();
-
-		std::string ops, plus_concat;
-		std::vector<int64_t> vals;
-		MakeColsFromPatchJSON(patch_json, ops, plus_concat, vals);
-
-		ops_data[i] = StringVector::AddString(ops_vec, ops);
-		plus_data[i] = StringVector::AddString(plus_vec, plus_concat);
-
-		idx_t needed = vals.size();
-		if (needed > 0) {
-			ListVector::Reserve(vals_vec, current_list_size + needed);
-			// reacquire pointer in case of reallocation
-			vals_child_data = FlatVector::GetData<int64_t>(vals_child);
-			for (idx_t j = 0; j < needed; j++) {
-				vals_child_data[current_list_size + j] = vals[j];
+		auto &opsv = row_ops[i];
+		std::string ops;
+		ops.reserve(opsv.size());
+		std::string plus_concat;
+		plus_concat.reserve(row_plus_bytes[i]);
+		idx_t ins_cp_total = 0;
+		// Fill vals into pre-reserved child
+		idx_t needed = row_val_len[i];
+		list_entries[i].offset = running_offset;
+		list_entries[i].length = needed;
+		idx_t w = 0;
+		for (auto &op : opsv) {
+			if (op.tag == '=') {
+				ops.push_back('=');
+				vals_child_data[running_offset + w++] = (int64_t)std::max<int64_t>(0, op.count);
+			} else if (op.tag == '+') {
+				ops.push_back('+');
+				if (!op.insert.empty()) {
+					plus_concat.append(op.insert);
+					ins_cp_total += (idx_t)Utf8CountCodepoints(op.insert.c_str(), op.insert.size());
+				}
+				vals_child_data[running_offset + w++] = (int64_t)ins_cp_total;
+			} else if (op.tag == '-') {
+				ops.push_back('-');
+				vals_child_data[running_offset + w++] = (int64_t)std::max<int64_t>(0, op.count);
+			} else {
+				// ignore
 			}
 		}
-		list_entries[i].offset = current_list_size;
-		list_entries[i].length = needed;
-		current_list_size += needed;
+		running_offset += needed;
+		ops_data[i] = StringVector::AddString(ops_vec, ops);
+		plus_data[i] = StringVector::AddString(plus_vec, plus_concat);
 	}
-	ListVector::SetListSize(vals_vec, current_list_size);
 }
 
 // Bind for make_cols_from_text(old_content, new_content, new_col_name)
@@ -438,43 +478,78 @@ inline void MakeColsFromTextFun(DataChunk &args, ExpressionState &state, Vector 
 	auto &vals_child = ListVector::GetEntry(vals_vec);
 	auto vals_child_data = FlatVector::GetData<int64_t>(vals_child);
 
-	idx_t current_list_size = ListVector::GetListSize(vals_vec);
-
+	// Prepass: build patch ops for rows where new is not NULL
+	std::vector<std::vector<patchjson::PatchOp>> row_ops(count);
+	std::vector<idx_t> row_val_len(count, 0);
+	std::vector<size_t> row_plus_bytes(count, 0);
+	idx_t total_vals = 0;
 	for (idx_t i = 0; i < count; i++) {
 		bool old_is_null = FlatVector::IsNull(old_col, i);
 		bool new_is_null = FlatVector::IsNull(new_col, i);
-		if (new_is_null) {
-			// new=NULL => no change: output empty fields
-			ops_data[i] = StringVector::AddString(ops_vec, "");
-			plus_data[i] = StringVector::AddString(plus_vec, "");
-			list_entries[i].offset = current_list_size;
-			list_entries[i].length = 0;
+		if (new_is_null)
 			continue;
-		}
 		std::string old_s = old_is_null ? std::string() : FlatVector::GetData<string_t>(old_col)[i].GetString();
 		std::string new_s = FlatVector::GetData<string_t>(new_col)[i].GetString();
 		std::string patch_json = diffpatch::GeneratePatchJson(old_s, new_s, false, nullptr);
-
-		std::string ops, plus_concat;
-		std::vector<int64_t> vals;
-		MakeColsFromPatchJSON(patch_json, ops, plus_concat, vals);
-
-		ops_data[i] = StringVector::AddString(ops_vec, ops);
-		plus_data[i] = StringVector::AddString(plus_vec, plus_concat);
-
-		idx_t needed = vals.size();
-		if (needed > 0) {
-			ListVector::Reserve(vals_vec, current_list_size + needed);
-			vals_child_data = FlatVector::GetData<int64_t>(vals_child);
-			for (idx_t j = 0; j < needed; j++) {
-				vals_child_data[current_list_size + j] = vals[j];
+		if (!patchjson::ParsePatchJSON(patch_json, row_ops[i]))
+			continue;
+		idx_t vals_len = 0;
+		size_t plus_bytes = 0;
+		for (auto &op : row_ops[i]) {
+			if (op.tag == '+' || op.tag == '-' || op.tag == '=')
+				vals_len++;
+			if (op.tag == '+')
+				plus_bytes += op.insert.size();
+		}
+		row_val_len[i] = vals_len;
+		row_plus_bytes[i] = plus_bytes;
+		total_vals += vals_len;
+	}
+	if (total_vals > 0) {
+		ListVector::Reserve(vals_vec, total_vals);
+		ListVector::SetListSize(vals_vec, total_vals);
+		vals_child_data = FlatVector::GetData<int64_t>(vals_child);
+	}
+	idx_t running_offset = 0;
+	for (idx_t i = 0; i < count; i++) {
+		bool new_is_null = FlatVector::IsNull(new_col, i);
+		if (new_is_null || row_ops[i].empty()) {
+			ops_data[i] = StringVector::AddString(ops_vec, "");
+			plus_data[i] = StringVector::AddString(plus_vec, "");
+			list_entries[i].offset = running_offset;
+			list_entries[i].length = 0;
+			continue;
+		}
+		auto &opsv = row_ops[i];
+		std::string ops;
+		ops.reserve(opsv.size());
+		std::string plus_concat;
+		plus_concat.reserve(row_plus_bytes[i]);
+		idx_t ins_cp_total = 0;
+		idx_t needed = row_val_len[i];
+		list_entries[i].offset = running_offset;
+		list_entries[i].length = needed;
+		idx_t w = 0;
+		for (auto &op : opsv) {
+			if (op.tag == '=') {
+				ops.push_back('=');
+				vals_child_data[running_offset + w++] = (int64_t)std::max<int64_t>(0, op.count);
+			} else if (op.tag == '+') {
+				ops.push_back('+');
+				if (!op.insert.empty()) {
+					plus_concat.append(op.insert);
+					ins_cp_total += (idx_t)Utf8CountCodepoints(op.insert.c_str(), op.insert.size());
+				}
+				vals_child_data[running_offset + w++] = (int64_t)ins_cp_total;
+			} else if (op.tag == '-') {
+				ops.push_back('-');
+				vals_child_data[running_offset + w++] = (int64_t)std::max<int64_t>(0, op.count);
 			}
 		}
-		list_entries[i].offset = current_list_size;
-		list_entries[i].length = needed;
-		current_list_size += needed;
+		running_offset += needed;
+		ops_data[i] = StringVector::AddString(ops_vec, ops);
+		plus_data[i] = StringVector::AddString(plus_vec, plus_concat);
 	}
-	ListVector::SetListSize(vals_vec, current_list_size);
 }
 
 static void LoadInternal(DatabaseInstance &instance) {
