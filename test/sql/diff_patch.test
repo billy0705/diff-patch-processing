@@ -157,3 +157,15 @@ query I
 SELECT make_cols_from_text('foo', NULL, 'nc')
 ----
 {'nc_ops': '', 'nc_plus_concat': '', 'nc_vals': []}
+
+# make_cols_from_text: new NULL -> empty columns
+query TTT
+SELECT (s).nc_ops, (s).nc_plus_concat, (s).nc_vals FROM (SELECT make_cols_from_text('foo', NULL, 'nc') AS s)
+----
+(empty)	(empty)	[]
+
+# make_cols_from_text: new NULL -> empty columns
+query I
+SELECT apply_cols('foo', (s).nc_ops, (s).nc_plus_concat, (s).nc_vals) FROM (SELECT make_cols_from_text('foo', NULL, 'nc') AS s)
+----
+NULL

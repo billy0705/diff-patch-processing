@@ -160,8 +160,8 @@ inline void ApplyColsScalarFun(DataChunk &args, ExpressionState &state, Vector &
 			}
 		}
 
-		// If old is NULL and ops/plus/vals are all empty, return NULL
-		if (old_is_null && ops_s.empty() && plus_s.empty() && vals.empty()) {
+		// If ops/plus/vals are all empty, return NULL (represents no-op)
+		if (ops_s.empty() && plus_s.empty() && vals.empty()) {
 			FlatVector::SetNull(result, i, true);
 			continue;
 		}
