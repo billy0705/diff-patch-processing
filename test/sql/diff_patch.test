@@ -169,3 +169,15 @@ query I
 SELECT apply_cols('foo', (s)._ops, (s)._plus_concat, (s)._vals) FROM (SELECT make_cols_from_text('foo', NULL, 'nc') AS s)
 ----
 NULL
+
+# make_patch: old NULL and new 'foo' -> insertion patch
+query I
+SELECT make_patch(NULL, NULL)
+----
+[]
+
+# make_cols_from_text: old NULL and new 'foo' -> '+' columns
+query I
+SELECT make_cols_from_text(NULL, NULL, 'nc')
+----
+{'_ops': '', '_plus_concat': '', '_vals': []}

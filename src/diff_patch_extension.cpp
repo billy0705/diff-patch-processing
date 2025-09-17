@@ -34,6 +34,10 @@ inline void DiffPatchScalarFun(DataChunk &args, ExpressionState &state, Vector &
 	auto &old_col = args.data[0];
 	auto &patch_col = args.data[1];
 
+	// Ensure we operate on flat vectors to avoid invalid string_t access
+	old_col.Flatten(args.size());
+	patch_col.Flatten(args.size());
+
 	result.SetVectorType(VectorType::FLAT_VECTOR);
 	auto out_data = FlatVector::GetData<string_t>(result);
 
@@ -332,7 +336,7 @@ inline void ApplyColsScalarFun(DataChunk &args, ExpressionState &state, Vector &
 						ins_cp_idx2 = (idx_t)end_cp;
 					}
 				} else {
-					static thread_local size_t plus_byte_idx_dummy = 0;
+					size_t plus_byte_idx_dummy = 0; // reset per row
 					if (end_cp > (size_t)ins_cp_idx2) {
 						size_t seg_cp = end_cp - (size_t)ins_cp_idx2;
 						size_t bytes = Utf8AdvanceBytes(plus_s, plus_byte_idx_dummy, seg_cp);
