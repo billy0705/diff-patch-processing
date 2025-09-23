@@ -299,31 +299,22 @@ static void MakeColsFromPatchJSON(const std::string &patch_json, std::string &op
 }
 
 // ---- Dynamic-named outputs ----
-// Bind for make_cols(patch_json, new_col_name)
+// Bind for make_cols(patch_json)
 static unique_ptr<FunctionData> MakeColsBind(ClientContext &context, ScalarFunction &bound_function,
                                              vector<unique_ptr<Expression>> &arguments) {
-	if (arguments.size() != 2) {
-		throw BinderException("make_cols expects (patch_json, new_col_name)");
-	}
-	string base = "col";
-	if (arguments[1]->expression_class == ExpressionClass::BOUND_CONSTANT) {
-		auto &cexpr = arguments[1]->Cast<BoundConstantExpression>();
-		if (!cexpr.value.IsNull()) {
-			base = cexpr.value.GetValue<string>();
-		}
-	} else {
-		throw BinderException("make_cols: new_col_name must be a constant string");
+	if (arguments.size() != 1) {
+		throw BinderException("make_cols expects (patch_json)");
 	}
 	child_list_t<LogicalType> struct_children;
-	struct_children.emplace_back(base + "_ops", LogicalType::VARCHAR);
-	struct_children.emplace_back(base + "_plus_concat", LogicalType::VARCHAR);
-	struct_children.emplace_back(base + "_vals", LogicalType::LIST(LogicalType::BIGINT));
+	struct_children.emplace_back("_ops", LogicalType::VARCHAR);
+	struct_children.emplace_back("_plus_concat", LogicalType::VARCHAR);
+	struct_children.emplace_back("_vals", LogicalType::LIST(LogicalType::BIGINT));
 	bound_function.return_type = LogicalType::STRUCT(std::move(struct_children));
 	return nullptr;
 }
 
-inline void MakeColsNamedFun(DataChunk &args, ExpressionState &state, Vector &result) {
-	// Inputs: (patch_json VARCHAR, new_col_name VARCHAR)
+inline void MakeColsFun(DataChunk &args, ExpressionState &state, Vector &result) {
+	// Inputs: (patch_json VARCHAR)
 	idx_t count = args.size();
 	auto &patch_col = args.data[0];
 	patch_col.Flatten(count);
@@ -379,28 +370,19 @@ inline void MakeColsNamedFun(DataChunk &args, ExpressionState &state, Vector &re
 // Bind for make_cols_from_text(old_content, new_content, new_col_name)
 static unique_ptr<FunctionData> MakeColsFromTextBind(ClientContext &context, ScalarFunction &bound_function,
                                                      vector<unique_ptr<Expression>> &arguments) {
-	if (arguments.size() != 3) {
-		throw BinderException("make_cols_from_text expects (old_content, new_content, new_col_name)");
-	}
-	string base = "col";
-	if (arguments[2]->expression_class == ExpressionClass::BOUND_CONSTANT) {
-		auto &cexpr = arguments[2]->Cast<BoundConstantExpression>();
-		if (!cexpr.value.IsNull()) {
-			base = cexpr.value.GetValue<string>();
-		}
-	} else {
-		throw BinderException("make_cols_from_text: new_col_name must be a constant string");
+	if (arguments.size() != 2) {
+		throw BinderException("make_cols_from_text expects (old_content, new_content)");
 	}
 	child_list_t<LogicalType> struct_children;
-	struct_children.emplace_back(base + "_ops", LogicalType::VARCHAR);
-	struct_children.emplace_back(base + "_plus_concat", LogicalType::VARCHAR);
-	struct_children.emplace_back(base + "_vals", LogicalType::LIST(LogicalType::BIGINT));
+	struct_children.emplace_back("_ops", LogicalType::VARCHAR);
+	struct_children.emplace_back("_plus_concat", LogicalType::VARCHAR);
+	struct_children.emplace_back("_vals", LogicalType::LIST(LogicalType::BIGINT));
 	bound_function.return_type = LogicalType::STRUCT(std::move(struct_children));
 	return nullptr;
 }
 
 inline void MakeColsFromTextFun(DataChunk &args, ExpressionState &state, Vector &result) {
-	// Inputs: (old_content VARCHAR, new_content VARCHAR, new_col_name VARCHAR)
+	// Inputs: (old_content VARCHAR, new_content VARCHAR)
 	idx_t count = args.size();
 	auto &old_col = args.data[0];
 	auto &new_col = args.data[1];
@@ -505,8 +487,8 @@ static void LoadInternal(DatabaseInstance &instance) {
 		dummy_children.emplace_back("ops", LogicalType::VARCHAR);
 		dummy_children.emplace_back("plus_concat", LogicalType::VARCHAR);
 		dummy_children.emplace_back("vals", LogicalType::LIST(LogicalType::BIGINT));
-		ScalarFunction make_cols_fn("make_cols", {LogicalType::VARCHAR, LogicalType::VARCHAR},
-		                            LogicalType::STRUCT(std::move(dummy_children)), MakeColsNamedFun, MakeColsBind);
+		ScalarFunction make_cols_fn("make_cols", {LogicalType::VARCHAR}, LogicalType::STRUCT(std::move(dummy_children)),
+		                            MakeColsFun, MakeColsBind);
 		ExtensionUtil::RegisterFunction(instance, make_cols_fn);
 	}
 
@@ -516,9 +498,9 @@ static void LoadInternal(DatabaseInstance &instance) {
 		dummy_children.emplace_back("ops", LogicalType::VARCHAR);
 		dummy_children.emplace_back("plus_concat", LogicalType::VARCHAR);
 		dummy_children.emplace_back("vals", LogicalType::LIST(LogicalType::BIGINT));
-		ScalarFunction make_cols_text_fn(
-		    "make_cols_from_text", {LogicalType::VARCHAR, LogicalType::VARCHAR, LogicalType::VARCHAR},
-		    LogicalType::STRUCT(std::move(dummy_children)), MakeColsFromTextFun, MakeColsFromTextBind);
+		ScalarFunction make_cols_text_fn("make_cols_from_text", {LogicalType::VARCHAR, LogicalType::VARCHAR},
+		                                 LogicalType::STRUCT(std::move(dummy_children)), MakeColsFromTextFun,
+		                                 MakeColsFromTextBind);
 		// Treat NULL old/new as empty strings: handle NULLs in the function
 		make_cols_text_fn.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
 		ExtensionUtil::RegisterFunction(instance, make_cols_text_fn);

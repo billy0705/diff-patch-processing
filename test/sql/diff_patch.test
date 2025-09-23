@@ -22,10 +22,10 @@ SELECT id, old_content, new_content FROM demo ORDER BY id
 2	你好世界	你🌈好地球
 3	abc	abcfoo
 
-# Derive columns with dynamic prefix 'nc'
+# Derive columns with dynamic prefix ''
 query TTTI
-SELECT CAST(id AS VARCHAR), (s).nc_ops, (s).nc_plus_concat, list_extract((s).nc_vals, 1)
-FROM (SELECT id, make_cols_from_text(old_content, new_content, 'nc') AS s FROM demo) t
+SELECT CAST(id AS VARCHAR), (s)._ops, (s)._plus_concat, list_extract((s)._vals, 1)
+FROM (SELECT id, make_cols_from_text(old_content, new_content) AS s FROM demo) t
 ORDER BY id
 ----
 1	=-+=+	🌟!	2
@@ -35,8 +35,8 @@ ORDER BY id
 # Reconstruct new_content using apply_cols
 query TT
 SELECT new_content,
-       apply_cols(old_content, (s).nc_ops, (s).nc_plus_concat, (s).nc_vals) AS reconstructed
-FROM (SELECT old_content, new_content, make_cols_from_text(old_content, new_content, 'nc') AS s FROM demo) t
+       apply_cols(old_content, (s)._ops, (s)._plus_concat, (s)._vals) AS reconstructed
+FROM (SELECT old_content, new_content, make_cols_from_text(old_content, new_content) AS s FROM demo) t
 ORDER BY new_content
 ----
 abcfoo	abcfoo
@@ -58,8 +58,8 @@ abcfoo	abcfoo
 query TTT
 SELECT CAST(id AS VARCHAR),
        length(new_content),
-       cols_len((s).nc_ops, (s).nc_vals)
-FROM (SELECT id, new_content, make_cols_from_text(old_content, new_content, 'nc') AS s FROM demo) t
+       cols_len((s)._ops, (s)._vals)
+FROM (SELECT id, new_content, make_cols_from_text(old_content, new_content) AS s FROM demo) t
 ORDER BY id
 ----
 1	5	5
@@ -85,8 +85,8 @@ NULL	0
 
 # make_cols on empty patch: empty fields
 query TTT
-SELECT (s).p_ops, (s).p_plus_concat, length((s).p_vals)
-FROM (SELECT make_cols('[]', 'p') AS s) t
+SELECT (s)._ops, (s)._plus_concat, length((s)._vals)
+FROM (SELECT make_cols('[]') AS s) t
 ----
 (empty)	(empty)	0
 
@@ -104,8 +104,8 @@ X
 
 # make_cols handles numeric '+' payload by stringifying
 query II
-SELECT (s).n_plus_concat, list_extract((s).n_vals, 2)
-FROM (SELECT make_cols('[["=", 1], ["+", 123]]', 'n') AS s) t
+SELECT (s)._plus_concat, list_extract((s)._vals, 2)
+FROM (SELECT make_cols('[["=", 1], ["+", 123]]') AS s) t
 ----
 123	3
 
@@ -142,9 +142,9 @@ SELECT make_patch(NULL, 'foo')
 
 # make_cols_from_text: old NULL and new 'foo' -> '+' columns
 query I
-SELECT make_cols_from_text(NULL, 'foo', 'nc')
+SELECT make_cols_from_text(NULL, 'foo')
 ----
-{'nc_ops': +, 'nc_plus_concat': foo, 'nc_vals': [3]}
+{'_ops': +, '_plus_concat': foo, '_vals': [3]}
 
 # make_patch: new NULL -> empty patch []
 query I
@@ -154,18 +154,18 @@ SELECT make_patch('foo', NULL)
 
 # make_cols_from_text: new NULL -> empty columns
 query I
-SELECT make_cols_from_text('foo', NULL, 'nc')
+SELECT make_cols_from_text('foo', NULL)
 ----
-{'nc_ops': '', 'nc_plus_concat': '', 'nc_vals': []}
+{'_ops': '', '_plus_concat': '', '_vals': []}
 
 # make_cols_from_text: new NULL -> empty columns
 query TTT
-SELECT (s).nc_ops, (s).nc_plus_concat, (s).nc_vals FROM (SELECT make_cols_from_text('foo', NULL, 'nc') AS s)
+SELECT (s)._ops, (s)._plus_concat, (s)._vals FROM (SELECT make_cols_from_text('foo', NULL) AS s)
 ----
 (empty)	(empty)	[]
 
 # make_cols_from_text: new NULL -> empty columns
 query I
-SELECT apply_cols('foo', (s).nc_ops, (s).nc_plus_concat, (s).nc_vals) FROM (SELECT make_cols_from_text('foo', NULL, 'nc') AS s)
+SELECT apply_cols('foo', (s)._ops, (s)._plus_concat, (s)._vals) FROM (SELECT make_cols_from_text('foo', NULL) AS s)
 ----
 NULL
