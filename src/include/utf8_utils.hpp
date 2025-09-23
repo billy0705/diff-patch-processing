@@ -53,6 +53,30 @@ static inline size_t Utf8AdvanceBytes(const std::string &s, size_t start_byte, s
 	return advanced;
 }
 
+// Variant operating on raw pointer/length buffers to avoid std::string copies.
+static inline size_t Utf8AdvanceBytes(const char *data, size_t len, size_t start_byte, size_t n_codepoints) {
+	size_t i = start_byte;
+	size_t advanced = 0;
+	while (i < len && n_codepoints > 0) {
+		unsigned char lead = static_cast<unsigned char>(data[i]);
+		size_t clen = Utf8CharLen(lead);
+		if (i + clen > len) {
+			clen = 1;
+		} else if (clen > 1) {
+			for (size_t k = 1; k < clen; ++k) {
+				if (!IsUtf8Continuation(static_cast<unsigned char>(data[i + k]))) {
+					clen = 1;
+					break;
+				}
+			}
+		}
+		i += clen;
+		advanced += clen;
+		--n_codepoints;
+	}
+	return advanced;
+}
+
 // Count codepoints in a UTF-8 buffer
 static inline size_t Utf8CountCodepoints(const char *data, size_t len) {
 	size_t i = 0;

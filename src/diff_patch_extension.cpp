@@ -154,63 +154,50 @@ inline void ApplyColsScalarFun(DataChunk &args, ExpressionState &state, Vector &
 
 		std::string ops_s = ops_data[i].GetString();
 		std::string plus_s = plus_data[i].GetString();
-
-		std::vector<int64_t> vals;
-		{
-			auto entry = list_entries[i];
-			vals.reserve(entry.length);
-			for (idx_t j = 0; j < entry.length; j++) {
-				vals.push_back(vals_child_data[entry.offset + j]);
-			}
-		}
+		auto entry = list_entries[i];
+		const int64_t *vals_ptr = vals_child_data + entry.offset;
 
 		// If ops/plus/vals are all empty, return NULL (represents no-op)
-		if (ops_s.empty() && plus_s.empty() && vals.empty()) {
+		if (ops_s.empty() && plus_s.empty() && entry.length == 0) {
 			FlatVector::SetNull(result, i, true);
 			continue;
 		}
 
 		std::string old_s = old_is_null ? std::string() : old_data[i].GetString();
+		const char *old_ptr = old_s.data();
+		size_t old_len = old_s.size();
 
 		// Use byte indices + Utf8AdvanceBytes scanning
-		size_t old_idx = 0;       // byte index into old_s
-		size_t ins_cp_idx = 0;    // cumulative cp consumed from plus_s
-		size_t plus_byte_idx = 0; // byte index into plus_s corresponding to ins_cp_idx
+		size_t old_idx = 0;        // byte index into old content
+		size_t plus_cp_cursor = 0; // cumulative cp consumed from plus_concat
+		size_t plus_byte_idx = 0;  // byte index into plus_concat corresponding to cursor
 		std::string out;
-		out.reserve(old_s.size() + plus_s.size());
+		out.reserve(old_len + plus_s.size());
 
-		// iterate operations; vals should have same length
-		size_t nops = ops_s.size();
-		size_t nvals = vals.size();
-		size_t steps = std::min(nops, nvals);
-		for (size_t k = 0; k < steps; k++) {
+		idx_t steps = MinValue<idx_t>(ops_s.size(), entry.length);
+		for (idx_t k = 0; k < steps; k++) {
 			char op = ops_s[k];
-			int64_t v = vals[k];
+			int64_t v = vals_ptr[k];
+			if (v < 0)
+				v = 0;
 			if (op == '=') {
-				if (v < 0)
-					v = 0;
-				size_t bytes = Utf8AdvanceBytes(old_s, old_idx, (size_t)v);
+				size_t bytes = Utf8AdvanceBytes(old_s, old_idx, static_cast<size_t>(v));
 				if (bytes > 0) {
-					out.append(old_s.data() + old_idx, bytes);
+					out.append(old_ptr + old_idx, bytes);
 					old_idx += bytes;
 				}
 			} else if (op == '-') {
-				if (v < 0)
-					v = 0;
-				size_t bytes = Utf8AdvanceBytes(old_s, old_idx, (size_t)v);
+				size_t bytes = Utf8AdvanceBytes(old_s, old_idx, static_cast<size_t>(v));
 				old_idx += bytes;
 			} else if (op == '+') {
-				// v is the cumulative codepoint end position in plus_s after this insertion
-				if (v < 0)
-					v = 0;
-				size_t end_cp = (size_t)v;
-				if (end_cp > ins_cp_idx) {
-					size_t seg_cp = end_cp - ins_cp_idx;
+				size_t target_cp = static_cast<size_t>(v);
+				if (target_cp > plus_cp_cursor && !plus_s.empty()) {
+					size_t seg_cp = target_cp - plus_cp_cursor;
 					size_t bytes = Utf8AdvanceBytes(plus_s, plus_byte_idx, seg_cp);
 					if (bytes > 0) {
 						out.append(plus_s.data() + plus_byte_idx, bytes);
 						plus_byte_idx += bytes;
-						ins_cp_idx = end_cp;
+						plus_cp_cursor = target_cp;
 					}
 				}
 			} else {
@@ -241,14 +228,17 @@ inline void ColsLenScalarFun(DataChunk &args, ExpressionState &state, Vector &re
 			out_data[i] = 0;
 			continue;
 		}
-		auto ops_s = ops_data[i].GetString();
+		auto ops_t = ops_data[i];
+		const char *ops_ptr = ops_t.GetDataUnsafe();
+		idx_t ops_len = ops_t.GetSize();
 		auto entry = list_entries[i];
-		idx_t steps = MinValue<idx_t>(ops_s.size(), entry.length);
+		const int64_t *vals_ptr = vals_child_data + entry.offset;
+		idx_t steps = MinValue<idx_t>(ops_len, entry.length);
 		long long total_eq = 0;
 		long long last_plus_cp = 0;
 		for (idx_t k = 0; k < steps; k++) {
-			char op = ops_s[k];
-			long long v = vals_child_data[entry.offset + k];
+			char op = ops_ptr[k];
+			long long v = vals_ptr[k];
 			if (v < 0)
 				v = 0;
 			if (op == '=') {
@@ -367,7 +357,7 @@ inline void MakeColsFun(DataChunk &args, ExpressionState &state, Vector &result)
 	ListVector::SetListSize(vals_vec, current_list_size);
 }
 
-// Bind for make_cols_from_text(old_content, new_content, new_col_name)
+// Bind for make_cols_from_text(old_content, new_content)
 static unique_ptr<FunctionData> MakeColsFromTextBind(ClientContext &context, ScalarFunction &bound_function,
                                                      vector<unique_ptr<Expression>> &arguments) {
 	if (arguments.size() != 2) {
@@ -481,7 +471,7 @@ static void LoadInternal(DatabaseInstance &instance) {
 	make_patch_scalar_function.null_handling = FunctionNullHandling::SPECIAL_HANDLING;
 	ExtensionUtil::RegisterFunction(instance, make_patch_scalar_function);
 
-	// Register make_cols(patch_json, new_col_name) with dynamic field names
+	// Register make_cols(patch_json)
 	{
 		child_list_t<LogicalType> dummy_children;
 		dummy_children.emplace_back("ops", LogicalType::VARCHAR);
@@ -492,7 +482,7 @@ static void LoadInternal(DatabaseInstance &instance) {
 		ExtensionUtil::RegisterFunction(instance, make_cols_fn);
 	}
 
-	// Register make_cols_from_text(old_content, new_content, new_col_name)
+	// Register make_cols_from_text(old_content, new_content)
 	{
 		child_list_t<LogicalType> dummy_children;
 		dummy_children.emplace_back("ops", LogicalType::VARCHAR);
