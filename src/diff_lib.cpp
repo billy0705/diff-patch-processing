@@ -3,14 +3,11 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
-#include <cmath>
 #include <cstdint>
 #include <cwctype>
 #include <deque>
 #include <functional>
-#include <limits>
 #include <list>
-#include <map>
 #include <iterator>
 #include <string>
 #include <unordered_map>
@@ -18,6 +15,7 @@
 
 #include "yyjson.hpp"
 #include "include/utf8_utils.hpp"
+#include "include/patch_json_utils.hpp"
 using namespace duckdb_yyjson;
 
 namespace diffpatch {
@@ -33,12 +31,16 @@ struct Diff {
 	}
 };
 
+// Utility structure used during the line-mode speedup pass.
 struct LinesToCharsResult {
 	std::u32string chars1;
 	std::u32string chars2;
 	std::vector<std::u32string> line_array;
 };
 
+// Lightweight port of Google's diff-match-patch tailored for UTF-32 inputs.
+// Public callers only need the `diff_main` overloads; everything else is
+// internal to the algorithm.
 class DiffMatchPatch {
 public:
 	float Diff_Timeout = 1.0f;
@@ -62,6 +64,7 @@ public:
 		return diff_main(text1, text2, checklines, deadline);
 	}
 
+private:
 	DiffList diff_main(const std::u32string &text1, const std::u32string &text2, bool checklines,
 	                   std::chrono::steady_clock::time_point deadline) {
 		if (&text1 == &text2) {
@@ -897,6 +900,8 @@ static std::u32string ToU32String(const std::vector<uint32_t> &codepoints) {
 	return result;
 }
 
+// Entry point used by the extension. Produces the compact JSON representation
+// that downstream SQL functions consume in order to materialize diff columns.
 std::string GeneratePatchJson(const std::string &old_utf8, const std::string &neu_utf8, bool autojunk,
                               const std::function<bool(uint32_t)> &isjunk) {
 	(void)autojunk;
@@ -907,57 +912,54 @@ std::string GeneratePatchJson(const std::string &old_utf8, const std::string &ne
 	Utf8ToCodepoints(neu_utf8, b, b_off);
 
 	DiffMatchPatch dmp;
-	std::u32string a32 = ToU32String(a);
-	std::u32string b32 = ToU32String(b);
+	std::u32string a32 = CodepointsToU32String(a);
+	std::u32string b32 = CodepointsToU32String(b);
 
 	auto diffs = dmp.diff_main(a32, b32);
-
-	yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
-	yyjson_mut_val *root = yyjson_mut_arr(doc);
-	yyjson_mut_doc_set_root(doc, root);
+	std::vector<patchjson::PatchOp> patch_ops;
+	patch_ops.reserve(diffs.size());
 
 	size_t a_index = 0;
 	size_t b_index = 0;
 	for (const auto &diff : diffs) {
-		if (diff.operation == Operation::Equal) {
-			size_t len = diff.text.size();
+		// Translate diff segments into the patch JSON dialect while converting
+		// code point lengths back to UTF-8 byte ranges as needed.
+		size_t len = diff.text.size();
+		switch (diff.operation) {
+		case Operation::Equal:
 			if (len > 0) {
-				yyjson_mut_val *arr = yyjson_mut_arr_add_arr(doc, root);
-				yyjson_mut_arr_add_str(doc, arr, "=");
-				yyjson_mut_arr_add_int(doc, arr, static_cast<int64_t>(len));
+				patchjson::PatchOp op;
+				op.tag = '=';
+				op.count = static_cast<int64_t>(len);
+				patch_ops.push_back(std::move(op));
 			}
 			a_index += len;
 			b_index += len;
-		} else if (diff.operation == Operation::Insert) {
-			size_t len = diff.text.size();
+			break;
+		case Operation::Insert:
 			if (len > 0) {
-				yyjson_mut_val *arr = yyjson_mut_arr_add_arr(doc, root);
-				yyjson_mut_arr_add_str(doc, arr, "+");
+				patchjson::PatchOp op;
+				op.tag = '+';
 				size_t start = b_off[b_index];
 				size_t end = b_off[b_index + len];
-				std::string sub = neu_utf8.substr(start, end - start);
-				yyjson_mut_arr_add_strcpy(doc, arr, sub.c_str());
+				op.insert = neu_utf8.substr(start, end - start);
+				patch_ops.push_back(std::move(op));
 			}
 			b_index += len;
-		} else if (diff.operation == Operation::Delete) {
-			size_t len = diff.text.size();
+			break;
+		case Operation::Delete:
 			if (len > 0) {
-				yyjson_mut_val *arr = yyjson_mut_arr_add_arr(doc, root);
-				yyjson_mut_arr_add_str(doc, arr, "-");
-				yyjson_mut_arr_add_int(doc, arr, static_cast<int64_t>(len));
+				patchjson::PatchOp op;
+				op.tag = '-';
+				op.count = static_cast<int64_t>(len);
+				patch_ops.push_back(std::move(op));
 			}
 			a_index += len;
+			break;
 		}
 	}
 
-	size_t out_len = 0;
-	char *out = yyjson_mut_write(doc, 0, &out_len);
-	std::string result = out ? std::string(out, out_len) : std::string("[]");
-	if (out) {
-		free(out);
-	}
-	yyjson_mut_doc_free(doc);
-	return result;
+	return patchjson::SerializePatchJSON(patch_ops);
 }
 
 } // namespace diffpatch

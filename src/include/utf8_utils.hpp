@@ -130,3 +130,13 @@ static inline void Utf8ToCodepoints(const std::string &s, std::vector<uint32_t> 
 	}
 	byte_offsets.push_back(n);
 }
+
+// Convert a sequence of Unicode code points to a UTF-32 string container.
+static inline std::u32string CodepointsToU32String(const std::vector<uint32_t> &codepoints) {
+	std::u32string result;
+	result.reserve(codepoints.size());
+	for (auto cp : codepoints) {
+		result.push_back(static_cast<char32_t>(cp));
+	}
+	return result;
+}

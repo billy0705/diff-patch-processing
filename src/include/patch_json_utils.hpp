@@ -102,6 +102,33 @@ inline bool ParsePatchJSON(const char *data, size_t len, std::vector<PatchOp> &o
 	return true;
 }
 
+// Serialize patch operations into the compact JSON form used by the extension.
+inline std::string SerializePatchJSON(const std::vector<PatchOp> &ops) {
+	using namespace duckdb_yyjson;
+	yyjson_mut_doc *doc = yyjson_mut_doc_new(nullptr);
+	yyjson_mut_val *root = yyjson_mut_arr(doc);
+	yyjson_mut_doc_set_root(doc, root);
+
+	for (const auto &op : ops) {
+		yyjson_mut_val *arr = yyjson_mut_arr_add_arr(doc, root);
+		yyjson_mut_arr_add_strn(doc, arr, &op.tag, 1);
+		if (op.tag == '+') {
+			yyjson_mut_arr_add_strcpy(doc, arr, op.insert.c_str());
+		} else {
+			yyjson_mut_arr_add_int(doc, arr, op.count);
+		}
+	}
+
+	size_t out_len = 0;
+	char *raw = yyjson_mut_write(doc, 0, &out_len);
+	std::string result = raw ? std::string(raw, out_len) : std::string("[]");
+	if (raw) {
+		free(raw);
+	}
+	yyjson_mut_doc_free(doc);
+	return result;
+}
+
 inline bool ParsePatchJSON(const std::string &json, std::vector<PatchOp> &out_ops) {
 	return ParsePatchJSON(json.c_str(), json.size(), out_ops);
 }
